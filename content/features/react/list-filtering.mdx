@@ -1,0 +1,157 @@
+---
+title: List Filtering
+summary: Filter and search large lists in React without the input lagging.
+category: react
+difficulty: intermediate
+tags: [filter, search, performance, list]
+technologies: [useMemo, useDeferredValue, React.memo]
+updated: 2026-11-08
+---
+
+## What it is
+
+Showing a list (products, users, orders) with a search box and filters. With a few items anything works. With thousands of items, the naive version filters on **every render**, so typing in the box feels slow.
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard">
+
+```tsx
+function ProductList({ products }: { products: Product[] }) {
+  const [query, setQuery] = useState("");
+  const [category, setCategory] = useState("all");
+
+  // ❌ Runs on EVERY render, including unrelated state changes
+  const visible = products.filter(
+    (p) =>
+      (category === "all" || p.category === category) &&
+      p.name.toLowerCase().includes(query.toLowerCase()),
+  );
+
+  return (
+    <>
+      <input value={query} onChange={(e) => setQuery(e.target.value)} />
+      <ul>
+        {visible.map((p) => (
+          <ProductRow key={p.id} product={p} />
+        ))}
+      </ul>
+    </>
+  );
+}
+```
+
+</Tab>
+<Tab label="Optimized">
+
+```tsx
+function ProductList({ products }: { products: Product[] }) {
+  const [query, setQuery] = useState("");
+  const [category, setCategory] = useState("all");
+
+  // ✅ Input updates instantly; the expensive list catches up a moment later
+  const deferredQuery = useDeferredValue(query);
+  const isStale = query !== deferredQuery;
+
+  // ✅ Lower-case the searchable text once, not on every keystroke
+  const indexed = useMemo(
+    () => products.map((p) => ({ ...p, _search: p.name.toLowerCase() })),
+    [products],
+  );
+
+  // ✅ Only re-filter when inputs actually change
+  const visible = useMemo(() => {
+    const q = deferredQuery.trim().toLowerCase();
+    return indexed.filter(
+      (p) => (category === "all" || p.category === category) && (!q || p._search.includes(q)),
+    );
+  }, [indexed, deferredQuery, category]);
+
+  return (
+    <>
+      <input value={query} onChange={(e) => setQuery(e.target.value)} />
+      <ul style={{ opacity: isStale ? 0.6 : 1 }}>
+        {visible.map((p) => (
+          <ProductRow key={p.id} product={p} />
+        ))}
+      </ul>
+    </>
+  );
+}
+
+// ✅ Rows don't re-render if their product didn't change
+const ProductRow = memo(function ProductRow({ product }: { product: Product }) {
+  return <li>{product.name}</li>;
+});
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's faster">
+- **`useDeferredValue`** (React 18+) lets React render the input first and the big list in the background, so typing never freezes.
+- **`useMemo`** caches the filtered result and only recomputes when `query`, `category` or `products` change.
+- **`React.memo`** on the row skips re-rendering rows whose props are unchanged.
+- Pre-computing the lower-cased text cuts work per keystroke.
+</Callout>
+
+## How to use
+
+1. Keep the raw input value in state (`query`) so the input stays controlled and instant.
+2. Wrap it with `useDeferredValue(query)` and filter using the deferred value.
+3. Put the filter in `useMemo` with exactly the values it reads as dependencies.
+4. Wrap list rows with `memo` and give them stable `key`s (database ids, not array index).
+5. Over ~5,000 visible rows? Combine with a [virtualized list](/css/virtualized-list).
+
+## Use-case demos
+
+### Use case 1: e-commerce filters (category + price + search)
+
+```tsx
+type Filters = { q: string; category: string; maxPrice: number; inStock: boolean };
+
+function useFilteredProducts(products: Product[], filters: Filters) {
+  const q = useDeferredValue(filters.q).toLowerCase();
+  return useMemo(
+    () =>
+      products.filter(
+        (p) =>
+          (filters.category === "all" || p.category === filters.category) &&
+          p.price <= filters.maxPrice &&
+          (!filters.inStock || p.stock > 0) &&
+          p.name.toLowerCase().includes(q),
+      ),
+    [products, q, filters.category, filters.maxPrice, filters.inStock],
+  );
+}
+```
+
+### Use case 2: keep filters in the URL (shareable links)
+
+```tsx
+"use client";
+import { useRouter, useSearchParams } from "next/navigation";
+
+export function useUrlFilter(key: string) {
+  const params = useSearchParams();
+  const router = useRouter();
+  const value = params.get(key) ?? "";
+  const setValue = (v: string) => {
+    const next = new URLSearchParams(params);
+    v ? next.set(key, v) : next.delete(key);
+    router.replace(`?${next}`, { scroll: false });
+  };
+  return [value, setValue] as const;
+}
+
+// const [q, setQ] = useUrlFilter("q");
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- Don't `useMemo` tiny lists (under ~100 items): the overhead isn't worth it.
+- Inline objects/functions passed to memoized rows (`onClick={() => ...}`) break `memo`. Use `useCallback`.
+- If the data lives on the server and is large (10k+ rows), filter **on the server** instead. See [Server-side filtering & pagination](/backend/server-filtering-pagination).
+</Callout>

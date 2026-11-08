@@ -1,0 +1,152 @@
+---
+title: Heavy Work in a Web Worker
+summary: Move CPU-heavy tasks (parsing, sorting, image processing) off the main thread so the UI never freezes.
+category: javascript
+difficulty: advanced
+tags: [performance, worker, threads, csv]
+technologies: [Web Worker, postMessage, Comlink, Transferable]
+updated: 2026-11-08
+---
+
+## What it is
+
+JavaScript in the page runs on **one main thread**, which also handles clicks, typing and painting. A 2-second loop (parsing a 50 MB CSV, sorting 1M rows, resizing an image) freezes the whole page. A **Web Worker** runs code on a separate thread and sends the result back.
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard">
+
+```ts
+// ❌ Page is frozen while this runs: no clicks, no spinner animation
+button.onclick = async () => {
+  const text = await file.text();
+  const rows = parseCsv(text);           // 1–3 s
+  const sorted = rows.sort(byRevenue);   // more blocking
+  renderTable(sorted);
+};
+```
+
+</Tab>
+<Tab label="Optimized">
+
+```ts
+// csv.worker.ts
+import { parseCsv } from "./parseCsv";
+
+self.onmessage = (e: MessageEvent<{ text: string }>) => {
+  const rows = parseCsv(e.data.text);
+  rows.sort((a, b) => b.revenue - a.revenue);
+  self.postMessage(rows);
+};
+```
+
+```ts
+// main.ts
+const worker = new Worker(new URL("./csv.worker.ts", import.meta.url), { type: "module" });
+
+function parseInWorker(text: string): Promise<Row[]> {
+  return new Promise((resolve, reject) => {
+    worker.onmessage = (e) => resolve(e.data);
+    worker.onerror = reject;
+    worker.postMessage({ text });
+  });
+}
+
+button.onclick = async () => {
+  showSpinner(); // ✅ keeps spinning
+  const rows = await parseInWorker(await file.text());
+  renderTable(rows);
+  hideSpinner();
+};
+```
+
+</Tab>
+<Tab label="With Comlink">
+
+```ts
+// math.worker.ts
+import * as Comlink from "comlink";
+const api = {
+  primes(limit: number) { /* heavy */ return computePrimes(limit); },
+};
+export type MathApi = typeof api;
+Comlink.expose(api);
+
+// main.ts
+import * as Comlink from "comlink";
+import type { MathApi } from "./math.worker";
+const math = Comlink.wrap<MathApi>(
+  new Worker(new URL("./math.worker.ts", import.meta.url), { type: "module" }),
+);
+const primes = await math.primes(5_000_000); // ✅ looks like a normal async call
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's better">
+- The **main thread stays free**, so the UI stays responsive and animations keep running.
+- Works in Next.js / Vite with `new Worker(new URL("./x.worker.ts", import.meta.url))`, and the bundler handles it.
+- **Transferables** (`postMessage(buf, [buf])`) move `ArrayBuffer`s with **zero copy** for big binary data.
+- **Comlink** removes the `postMessage` boilerplate.
+</Callout>
+
+## How to use
+
+1. Find the slow function (Chrome DevTools → Performance → long tasks over 50 ms).
+2. Move it to `something.worker.ts`. It must not touch `document` or `window` (no DOM in workers).
+3. Create the worker **once** and reuse it. Creating one costs a few ms.
+4. Send plain data (objects, arrays, ArrayBuffers). Functions and class instances can't be sent.
+5. In React, create the worker in `useEffect` and `worker.terminate()` on unmount.
+
+## Use-case demos
+
+### Use case 1: React hook for a worker
+
+```tsx
+export function useCsvWorker() {
+  const ref = useRef<Worker>();
+  useEffect(() => {
+    ref.current = new Worker(new URL("../workers/csv.worker.ts", import.meta.url), { type: "module" });
+    return () => ref.current?.terminate();
+  }, []);
+  return useCallback(
+    (text: string) =>
+      new Promise<Row[]>((resolve) => {
+        ref.current!.onmessage = (e) => resolve(e.data);
+        ref.current!.postMessage({ text });
+      }),
+    [],
+  );
+}
+```
+
+### Use case 2: image processing with zero-copy transfer
+
+```ts
+// main
+const bitmap = await createImageBitmap(file);
+const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+const { data } = canvas.getContext("2d")!.getImageData(0, 0, bitmap.width, bitmap.height);
+worker.postMessage({ buffer: data.buffer, w: bitmap.width }, [data.buffer]); // transferred, not copied
+
+// worker: grayscale
+self.onmessage = (e) => {
+  const px = new Uint8ClampedArray(e.data.buffer);
+  for (let i = 0; i < px.length; i += 4) {
+    const g = px[i] * 0.3 + px[i + 1] * 0.59 + px[i + 2] * 0.11;
+    px[i] = px[i + 1] = px[i + 2] = g;
+  }
+  self.postMessage(px.buffer, [px.buffer]);
+};
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- Sending huge objects with `postMessage` **copies** them (structured clone), which can be slower than the work itself. Use Transferables.
+- Workers don't help with **network** waiting. That's already async.
+- Not worth it for work under ~50 ms.
+</Callout>

@@ -1,0 +1,140 @@
+---
+title: Performant Animations
+summary: Smooth 60 fps animations by animating transform and opacity instead of layout properties.
+category: css
+difficulty: intermediate
+tags: [animation, performance, transitions, accessibility]
+technologies: [transform, opacity, will-change, Web Animations API, prefers-reduced-motion]
+updated: 2026-11-08
+---
+
+## What it is
+
+The browser renders in stages: **Layout → Paint → Composite**. Animating `width`, `height`, `top`, `left` or `margin` re-runs **layout** every frame (slow, janky). Animating `transform` and `opacity` only touches the **composite** step, which the GPU handles.
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard">
+
+```css
+/* ❌ Triggers layout + paint every frame */
+.drawer {
+  position: fixed;
+  left: -320px;
+  width: 320px;
+  transition: left 0.3s;
+}
+.drawer.open { left: 0; }
+
+.card:hover {
+  margin-top: -4px;          /* layout */
+  box-shadow: 0 20px 40px #0003; /* expensive paint when animated */
+  transition: all 0.3s;      /* animates everything, even unintended props */
+}
+```
+
+</Tab>
+<Tab label="Optimized">
+
+```css
+/* ✅ Compositor-only: transform + opacity */
+.drawer {
+  position: fixed;
+  left: 0;
+  width: 320px;
+  transform: translateX(-100%);
+  transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.drawer.open { transform: translateX(0); }
+
+.card {
+  position: relative;
+  transition: transform 0.2s ease;
+}
+.card::after {
+  /* pre-rendered shadow; we only fade its opacity */
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 20px 40px #0003;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  pointer-events: none;
+}
+.card:hover { transform: translateY(-4px); }
+.card:hover::after { opacity: 1; }
+
+/* ✅ Respect users who get motion sickness */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+```
+
+</Tab>
+<Tab label="Tailwind">
+
+```html
+<aside class="fixed inset-y-0 left-0 w-80 -translate-x-full transition-transform duration-300 ease-out data-[open=true]:translate-x-0 motion-reduce:transition-none">
+  …
+</aside>
+
+<div class="transition-transform duration-200 hover:-translate-y-1 motion-reduce:transform-none">Card</div>
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's smoother">
+- **`transform` / `opacity`** skip layout and paint, so they run on the GPU compositor even if JS is busy.
+- Transition **specific properties**, not `all`, so you don't animate things by accident.
+- **Fade a pre-made shadow** (`::after` opacity) instead of animating `box-shadow`.
+- **`prefers-reduced-motion`** is an accessibility must.
+</Callout>
+
+## How to use
+
+1. Replace position/size animations with `translate`, `scale` and `rotate`.
+2. Replace show/hide with `opacity` (+ `visibility` or `pointer-events` when hidden).
+3. Use `will-change: transform` **only** on elements about to animate (e.g. add on hover/open, remove after).
+4. Check in Chrome DevTools → Rendering → "Paint flashing" (green flashes = repaints).
+
+## Use-case demos
+
+### Use case 1: modal enter animation
+
+```css
+.modal { opacity: 0; transform: scale(0.96) translateY(8px); transition: opacity .2s, transform .2s; }
+.modal[data-open="true"] { opacity: 1; transform: none; }
+
+/* Modern: animate from display:none (Chrome/Edge/Safari) */
+dialog[open] { animation: pop .2s ease-out; }
+@keyframes pop { from { opacity: 0; transform: scale(.96); } }
+```
+
+### Use case 2: animate height smoothly (accordion) without measuring
+
+```css
+/* ✅ grid-rows trick: animates 0fr → 1fr */
+.accordion-body { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .25s ease; }
+.accordion[open] .accordion-body { grid-template-rows: 1fr; }
+.accordion-body > div { overflow: hidden; }
+```
+
+### Use case 3: JS-controlled animation (Web Animations API)
+
+```ts
+el.animate(
+  [{ transform: "translateX(0)" }, { transform: "translateX(-8px)" }, { transform: "translateX(8px)" }, { transform: "translateX(0)" }],
+  { duration: 300, easing: "ease-in-out" },
+); // shake on invalid input, no library needed
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- `will-change` on many elements uses lots of GPU memory. Use it sparingly.
+- `transform` creates a new stacking context, which can affect `z-index` and `position: fixed` children.
+- Keep UI animations short: 150–300 ms.
+</Callout>

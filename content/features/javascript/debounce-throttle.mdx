@@ -1,0 +1,126 @@
+---
+title: Debounce & Throttle
+summary: Limit how often a function runs during rapid events like typing, scrolling and resizing.
+category: javascript
+difficulty: beginner
+tags: [performance, events, debounce, throttle]
+technologies: [setTimeout, requestAnimationFrame, TypeScript generics]
+updated: 2026-11-08
+---
+
+## What it is
+
+Events like `input`, `scroll`, `resize` and `mousemove` can fire **dozens of times per second**. If each one does real work (API call, layout calculation), the page stutters.
+
+- **Debounce**: run once, **after** the events stop for X ms. Good for search inputs, autosave, window resize end.
+- **Throttle**: run **at most once every** X ms while events continue. Good for scroll position, drag, infinite scroll checks.
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard">
+
+```ts
+// ❌ Runs on every scroll event (can be 100+/sec)
+window.addEventListener("scroll", () => {
+  const progress = window.scrollY / (document.body.scrollHeight - innerHeight);
+  progressBar.style.width = `${progress * 100}%`;
+});
+
+// ❌ API call on every keystroke
+input.addEventListener("input", (e) => saveDraft((e.target as HTMLInputElement).value));
+```
+
+</Tab>
+<Tab label="Optimized">
+
+```ts
+export function debounce<A extends unknown[]>(fn: (...args: A) => void, wait = 300) {
+  let t: ReturnType<typeof setTimeout> | undefined;
+  const debounced = (...args: A) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), wait);
+  };
+  debounced.cancel = () => clearTimeout(t);
+  return debounced;
+}
+
+export function throttle<A extends unknown[]>(fn: (...args: A) => void, wait = 100) {
+  let last = 0;
+  let t: ReturnType<typeof setTimeout> | undefined;
+  return (...args: A) => {
+    const now = Date.now();
+    const remaining = wait - (now - last);
+    if (remaining <= 0) {
+      last = now;
+      fn(...args);
+    } else {
+      clearTimeout(t); // ✅ trailing call so the final value is never lost
+      t = setTimeout(() => ((last = Date.now()), fn(...args)), remaining);
+    }
+  };
+}
+
+// ✅ Visual updates: sync with the screen refresh instead of a timer
+export function rafThrottle<A extends unknown[]>(fn: (...args: A) => void) {
+  let frame = 0;
+  return (...args: A) => {
+    if (frame) return;
+    frame = requestAnimationFrame(() => ((frame = 0), fn(...args)));
+  };
+}
+
+window.addEventListener("scroll", rafThrottle(updateProgress), { passive: true });
+input.addEventListener("input", debounce((e: Event) => saveDraft((e.target as HTMLInputElement).value), 500));
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's faster">
+- **Debounce** turns 20 keystrokes into **1** call.
+- **Throttle** caps work at a fixed rate (e.g. 10/sec) but still updates during the action.
+- **`requestAnimationFrame`** runs at most once per frame (~60/sec), exactly when the browser paints, so animations look smooth.
+- **`{ passive: true }`** tells the browser you won't call `preventDefault()`, so scrolling isn't blocked.
+</Callout>
+
+## How to use
+
+1. Put `debounce` / `throttle` in `lib/timing.ts` (or use `lodash-es/debounce`).
+2. Create the debounced function **once**, not inside a render or loop.
+3. In React, keep it stable with `useMemo` and cancel it on unmount.
+4. Pick a delay: search 300 ms, autosave 500–1000 ms, scroll/resize 100 ms or rAF.
+
+## Use-case demos
+
+### Use case 1: React hook with a stable debounced callback
+
+```tsx
+export function useDebouncedCallback<A extends unknown[]>(fn: (...a: A) => void, wait = 300) {
+  const fnRef = useRef(fn);
+  fnRef.current = fn; // always call the latest version
+  const debounced = useMemo(() => debounce((...a: A) => fnRef.current(...a), wait), [wait]);
+  useEffect(() => () => debounced.cancel(), [debounced]);
+  return debounced;
+}
+
+// const save = useDebouncedCallback((text: string) => api.saveDraft(text), 800);
+```
+
+### Use case 2: infinite scroll check (throttled)
+
+```ts
+const onScroll = throttle(() => {
+  const nearBottom = innerHeight + scrollY >= document.body.offsetHeight - 600;
+  if (nearBottom && !loading) loadNextPage();
+}, 200);
+window.addEventListener("scroll", onScroll, { passive: true });
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- Creating `debounce(fn)` **inside** a React component body without `useMemo` makes a new timer every render, so it never fires correctly.
+- For infinite scroll, `IntersectionObserver` is usually better than a throttled scroll listener.
+- Don't debounce actions that must feel instant (button clicks, toggles).
+</Callout>

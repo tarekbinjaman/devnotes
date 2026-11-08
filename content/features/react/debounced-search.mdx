@@ -1,0 +1,156 @@
+---
+title: Debounced Search (API)
+summary: Search-as-you-type that calls the API once the user pauses, and never shows stale results.
+category: react
+difficulty: intermediate
+tags: [search, debounce, fetch, api]
+technologies: [useEffect, AbortController, debounce, SWR]
+updated: 2026-11-08
+---
+
+## What it is
+
+A search box that fetches results from a server while the user types. The naive version sends **one request per keystroke** ("r", "re", "rea", "reac"…), and slow responses can arrive out of order, so **old results overwrite new ones**.
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard">
+
+```tsx
+function Search() {
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState<Item[]>([]);
+
+  useEffect(() => {
+    // ❌ Fires on every keystroke, no cancellation → race conditions
+    fetch(`/api/search?q=${q}`)
+      .then((r) => r.json())
+      .then(setResults);
+  }, [q]);
+
+  return <input value={q} onChange={(e) => setQ(e.target.value)} />;
+}
+```
+
+</Tab>
+<Tab label="Optimized">
+
+```tsx
+function useDebounce<T>(value: T, delay = 300) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(id);
+  }, [value, delay]);
+  return debounced;
+}
+
+function Search() {
+  const [q, setQ] = useState("");
+  const debouncedQ = useDebounce(q.trim(), 300);
+  const [results, setResults] = useState<Item[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!debouncedQ) return setResults([]);
+    const controller = new AbortController(); // ✅ cancel outdated requests
+    setLoading(true);
+    fetch(`/api/search?q=${encodeURIComponent(debouncedQ)}`, { signal: controller.signal })
+      .then((r) => r.json())
+      .then(setResults)
+      .catch((e) => e.name !== "AbortError" && console.error(e))
+      .finally(() => !controller.signal.aborted && setLoading(false));
+    return () => controller.abort();
+  }, [debouncedQ]);
+
+  return (
+    <>
+      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search…" />
+      {loading && <p>Searching…</p>}
+      <ul>{results.map((r) => <li key={r.id}>{r.name}</li>)}</ul>
+    </>
+  );
+}
+```
+
+</Tab>
+<Tab label="With SWR">
+
+```tsx
+import useSWR from "swr";
+
+const fetcher = (url: string) => fetch(url).then((r) => r.json());
+
+function Search() {
+  const [q, setQ] = useState("");
+  const debouncedQ = useDebounce(q.trim(), 300);
+  // ✅ SWR caches each query, dedupes requests and only shows the latest key
+  const { data = [], isLoading } = useSWR(
+    debouncedQ ? `/api/search?q=${encodeURIComponent(debouncedQ)}` : null,
+    fetcher,
+    { keepPreviousData: true },
+  );
+  return (/* same JSX */);
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's better">
+- **Debounce** waits until typing pauses (300 ms), so "react" makes 1 request instead of 5.
+- **`AbortController`** cancels the previous request, so a slow old response can never replace newer results.
+- **`encodeURIComponent`** stops spaces and `&` from breaking the URL.
+- **SWR / React Query** also cache results: typing "react", deleting a letter and retyping it is instant.
+</Callout>
+
+## How to use
+
+1. Copy the `useDebounce` hook into `hooks/useDebounce.ts`.
+2. Debounce the **value**, not the `onChange` handler, so the input stays responsive.
+3. Fetch inside `useEffect` with an `AbortController`, and abort in the cleanup.
+4. Show a loading state and an empty state ("No results for …").
+5. 250–400 ms is a good delay for search.
+
+## Use-case demos
+
+### Use case 1: Next.js route handler for the search API
+
+```ts
+// app/api/search/route.ts
+import { NextResponse } from "next/server";
+import { db } from "@/lib/db";
+
+export async function GET(req: Request) {
+  const q = new URL(req.url).searchParams.get("q")?.trim() ?? "";
+  if (q.length < 2) return NextResponse.json([]);
+  const items = await db.product.findMany({
+    where: { name: { contains: q, mode: "insensitive" } },
+    take: 10,
+    select: { id: true, name: true },
+  });
+  return NextResponse.json(items);
+}
+```
+
+### Use case 2: autocomplete with keyboard navigation
+
+```tsx
+const [active, setActive] = useState(-1);
+
+function onKeyDown(e: React.KeyboardEvent) {
+  if (e.key === "ArrowDown") setActive((i) => Math.min(i + 1, results.length - 1));
+  if (e.key === "ArrowUp") setActive((i) => Math.max(i - 1, 0));
+  if (e.key === "Enter" && results[active]) router.push(`/product/${results[active].id}`);
+  if (e.key === "Escape") setResults([]);
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- For **local** data (already in memory) you don't need debounce. Use [List Filtering](/react/list-filtering) with `useDeferredValue`.
+- Set a minimum query length (2–3 chars) so you don't search the whole database for "a".
+- In React Strict Mode (dev), effects run twice. The AbortController makes that harmless.
+</Callout>

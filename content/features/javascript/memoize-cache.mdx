@@ -1,0 +1,135 @@
+---
+title: Memoize & Cache Functions
+summary: Remember results of expensive or repeated calls (calculations and API requests) instead of recomputing them.
+category: javascript
+difficulty: intermediate
+tags: [cache, memoize, performance, fetch]
+technologies: [Map, WeakMap, LRU cache, Promise caching]
+updated: 2026-11-08
+---
+
+## What it is
+
+If a function is **pure** (same input → same output) and expensive, compute it once per input and store the result. The same idea applies to network requests: if three components ask for `/api/user/42` at the same time, send **one** request.
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard">
+
+```ts
+// ❌ Recomputed every call
+function shippingCost(weightKg: number, zone: string) {
+  return heavyRateTableLookup(weightKg, zone); // slow
+}
+
+// ❌ Three components → three identical requests
+async function getUser(id: string) {
+  const res = await fetch(`/api/users/${id}`);
+  return res.json();
+}
+```
+
+</Tab>
+<Tab label="Optimized">
+
+```ts
+/** Memoize with a size limit (LRU) so memory can't grow forever. */
+export function memoize<A extends unknown[], R>(
+  fn: (...args: A) => R,
+  { max = 500, key = (...a: A) => JSON.stringify(a) } = {},
+) {
+  const cache = new Map<string, R>();
+  return (...args: A): R => {
+    const k = key(...args);
+    if (cache.has(k)) {
+      const v = cache.get(k)!;
+      cache.delete(k); // move to "most recent"
+      cache.set(k, v);
+      return v;
+    }
+    const v = fn(...args);
+    cache.set(k, v);
+    if (cache.size > max) cache.delete(cache.keys().next().value!); // evict oldest
+    return v;
+  };
+}
+
+export const shippingCost = memoize((weightKg: number, zone: string) =>
+  heavyRateTableLookup(weightKg, zone),
+);
+
+/** Cache the PROMISE: concurrent callers share one request; expire after ttl. */
+const inflight = new Map<string, { at: number; p: Promise<unknown> }>();
+
+export function cachedFetch<T>(url: string, ttl = 30_000): Promise<T> {
+  const hit = inflight.get(url);
+  if (hit && Date.now() - hit.at < ttl) return hit.p as Promise<T>;
+  const p = fetch(url)
+    .then((r) => {
+      if (!r.ok) throw new Error(`${r.status}`);
+      return r.json();
+    })
+    .catch((e) => {
+      inflight.delete(url); // ✅ don't cache failures
+      throw e;
+    });
+  inflight.set(url, { at: Date.now(), p });
+  return p as Promise<T>;
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's faster">
+- A **Map lookup is O(1)**, much cheaper than recomputing.
+- **LRU eviction** keeps memory bounded.
+- Caching the **Promise** (not the result) dedupes requests that are already in flight.
+- A **TTL** keeps data reasonably fresh, and failures are removed so they can be retried.
+</Callout>
+
+## How to use
+
+1. Only memoize **pure** functions (no randomness, no reading changing globals).
+2. Choose a key: `JSON.stringify(args)` for simple args, or the id for objects.
+3. Set a `max` size or TTL. Unlimited caches are memory leaks.
+4. For objects as keys (DOM nodes, parsed data), use `WeakMap` so entries vanish when the object is garbage collected.
+5. In React apps, prefer **SWR / TanStack Query** for server data: they implement this plus revalidation.
+
+## Use-case demos
+
+### Use case 1: WeakMap cache for derived data per object
+
+```ts
+const statsCache = new WeakMap<Order[], { total: number; avg: number }>();
+
+export function orderStats(orders: Order[]) {
+  let s = statsCache.get(orders);
+  if (!s) {
+    const total = orders.reduce((sum, o) => sum + o.amount, 0);
+    s = { total, avg: orders.length ? total / orders.length : 0 };
+    statsCache.set(orders, s);
+  }
+  return s;
+}
+```
+
+### Use case 2: Next.js server, dedupe DB calls per request
+
+```ts
+import { cache } from "react";
+
+// Called from layout + page + metadata → runs the query once per request
+export const getProduct = cache(async (slug: string) => {
+  return db.product.findUnique({ where: { slug } });
+});
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- Don't memoize cheap functions: hashing the key can cost more than the work.
+- `JSON.stringify` keys are slow for big objects and depend on key order.
+- Cached mutable objects can be changed by a caller and corrupt the cache. Return copies or freeze them.
+</Callout>

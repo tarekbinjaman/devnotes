@@ -1,0 +1,143 @@
+---
+title: Virtualized Long Lists
+summary: Render 100,000 rows smoothly by only putting the visible rows in the DOM.
+category: css
+difficulty: intermediate
+tags: [list, table, performance, scroll]
+technologies: [TanStack Virtual, content-visibility, CSS transform]
+updated: 2026-11-08
+---
+
+## What it is
+
+Every DOM element costs memory and layout time. 10,000 table rows = tens of thousands of elements, so scrolling stutters and the first render takes seconds. **Virtualization** (windowing) renders only the ~20 rows visible on screen plus a small buffer, and positions them inside a tall spacer so the scrollbar still looks right.
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard">
+
+```tsx
+// ❌ 50,000 <li> elements in the DOM
+function LogList({ logs }: { logs: Log[] }) {
+  return (
+    <ul className="h-[600px] overflow-auto">
+      {logs.map((l) => (
+        <li key={l.id} className="h-9 border-b px-3">{l.message}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+</Tab>
+<Tab label="Optimized">
+
+```tsx
+import { useVirtualizer } from "@tanstack/react-virtual";
+
+function LogList({ logs }: { logs: Log[] }) {
+  const parentRef = useRef<HTMLDivElement>(null);
+  const v = useVirtualizer({
+    count: logs.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 36, // row height in px
+    overscan: 8,            // extra rows above/below for smooth scrolling
+  });
+
+  return (
+    <div ref={parentRef} className="h-[600px] overflow-auto">
+      {/* tall spacer = full list height */}
+      <div style={{ height: v.getTotalSize(), position: "relative" }}>
+        {v.getVirtualItems().map((row) => (
+          <div
+            key={logs[row.index].id}
+            className="absolute left-0 top-0 h-9 w-full border-b px-3"
+            style={{ transform: `translateY(${row.start}px)` }} // ✅ GPU-friendly positioning
+          >
+            {logs[row.index].message}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+</Tab>
+<Tab label="CSS only">
+
+```css
+/* ✅ Zero JS: browser skips layout/paint for off-screen items.
+   Good for long articles/cards (hundreds, not 100k). */
+.feed-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px; /* estimated height placeholder */
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's faster">
+- The DOM holds **~30 rows instead of 50,000**, so initial render and memory drop massively.
+- **`transform: translateY`** moves rows without triggering layout, so scrolling stays at 60 fps.
+- **`content-visibility: auto`** is a one-line CSS alternative where the browser skips rendering off-screen sections.
+</Callout>
+
+## How to use
+
+1. `npm i @tanstack/react-virtual`
+2. Give the scroll container a **fixed height** and `overflow: auto`.
+3. Set `estimateSize` to your row height. For variable heights add `ref={v.measureElement}` and `data-index={row.index}` on each row.
+4. Render the spacer (`getTotalSize()`) and absolutely position each visible row.
+5. Combine with [List Filtering](/react/list-filtering): filter first, then virtualize the result.
+
+## Use-case demos
+
+### Use case 1: variable-height rows (chat messages)
+
+```tsx
+const v = useVirtualizer({
+  count: messages.length,
+  getScrollElement: () => parentRef.current,
+  estimateSize: () => 80,
+});
+
+{v.getVirtualItems().map((row) => (
+  <div
+    key={row.key}
+    data-index={row.index}
+    ref={v.measureElement} // ✅ measures real height after render
+    className="absolute left-0 w-full"
+    style={{ transform: `translateY(${row.start}px)` }}
+  >
+    <Message msg={messages[row.index]} />
+  </div>
+))}
+```
+
+### Use case 2: virtualized grid of product cards
+
+```tsx
+const columns = 4;
+const rowCount = Math.ceil(products.length / columns);
+const v = useVirtualizer({ count: rowCount, getScrollElement: () => ref.current, estimateSize: () => 320 });
+
+{v.getVirtualItems().map((row) => (
+  <div key={row.key} className="absolute grid w-full grid-cols-4 gap-4"
+       style={{ transform: `translateY(${row.start}px)` }}>
+    {products.slice(row.index * columns, row.index * columns + columns).map((p) => (
+      <ProductCard key={p.id} product={p} />
+    ))}
+  </div>
+))}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- Ctrl+F browser search can't find rows that aren't rendered.
+- Under ~300 simple rows, virtualization adds complexity for no gain.
+- Consider **pagination** or **server-side filtering** first. Do users really need 50k rows on one screen?
+</Callout>

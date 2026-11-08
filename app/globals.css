@@ -1,0 +1,65 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --code-bg: #f6f8fa;
+}
+.dark {
+  --code-bg: #1c2128;
+}
+
+body {
+  @apply bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100;
+}
+
+/* ---- Code blocks (rehype-pretty-code + shiki dual theme) ---- */
+pre {
+  background: var(--code-bg) !important;
+  border-radius: 0.75rem;
+  padding: 2.25rem 0 1rem !important;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  border: 1px solid rgb(0 0 0 / 0.06);
+}
+.dark pre {
+  border-color: rgb(255 255 255 / 0.06);
+}
+pre code {
+  display: grid;
+  background: transparent !important;
+  padding: 0 !important;
+  counter-reset: line;
+}
+pre code [data-line] {
+  padding: 0 1rem;
+}
+pre code [data-highlighted-line] {
+  background: rgb(99 102 241 / 0.12);
+  border-left: 3px solid rgb(99 102 241);
+}
+code[data-theme],
+code[data-theme] span {
+  color: var(--shiki-light);
+}
+.dark code[data-theme],
+.dark code[data-theme] span {
+  color: var(--shiki-dark);
+}
+
+/* Inline code */
+.prose :not(pre) > code {
+  @apply rounded bg-zinc-200/70 px-1.5 py-0.5 font-normal text-[0.85em] dark:bg-zinc-800;
+}
+.prose :not(pre) > code::before,
+.prose :not(pre) > code::after {
+  content: none;
+}
+.prose h2 {
+  scroll-margin-top: 5rem;
+}
+.code-tab-panel pre {
+  margin-top: 0.75rem;
+}

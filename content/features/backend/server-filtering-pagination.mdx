@@ -1,0 +1,144 @@
+---
+title: Server-side Filtering & Pagination
+summary: Filter, sort and page large datasets in the database and send only one page to the browser.
+category: backend
+difficulty: intermediate
+tags: [filter, pagination, api, database, prisma]
+technologies: [Cursor pagination, Prisma, SQL, Zod, Next.js Route Handlers]
+updated: 2026-11-08
+---
+
+## What it is
+
+When a table has 10k+ rows, sending everything to the browser and filtering there is slow and wasteful. Instead the API accepts filters (`?q=shoe&category=men&sort=price`) and returns **one page**. Pagination can be **offset** (`page=5`) or **cursor** (`after=<last id>`).
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard">
+
+```ts
+// ❌ Loads ALL products, filters in JS, offset paging
+export async function GET(req: Request) {
+  const sp = new URL(req.url).searchParams;
+  const all = await db.product.findMany(); // 200k rows into memory
+  const filtered = all.filter((p) => p.name.includes(sp.get("q") ?? ""));
+  const page = Number(sp.get("page") ?? 1);
+  return Response.json(filtered.slice((page - 1) * 20, page * 20));
+}
+```
+
+</Tab>
+<Tab label="Optimized">
+
+```ts
+// app/api/products/route.ts
+import { z } from "zod";
+import { db } from "@/lib/db";
+
+const Query = z.object({
+  q: z.string().trim().max(100).optional(),
+  category: z.string().optional(),
+  minPrice: z.coerce.number().min(0).optional(),
+  maxPrice: z.coerce.number().min(0).optional(),
+  sort: z.enum(["newest", "price_asc", "price_desc"]).default("newest"),
+  cursor: z.string().optional(),               // id of last item from previous page
+  limit: z.coerce.number().min(1).max(100).default(20),
+});
+
+const orderBy = {
+  newest: [{ createdAt: "desc" }, { id: "desc" }],
+  price_asc: [{ price: "asc" }, { id: "asc" }],
+  price_desc: [{ price: "desc" }, { id: "desc" }],
+} as const;
+
+export async function GET(req: Request) {
+  const parsed = Query.safeParse(Object.fromEntries(new URL(req.url).searchParams));
+  if (!parsed.success) return Response.json(parsed.error.flatten(), { status: 400 });
+  const { q, category, minPrice, maxPrice, sort, cursor, limit } = parsed.data;
+
+  // ✅ Filtering happens IN the database (uses indexes)
+  const items = await db.product.findMany({
+    where: {
+      ...(q && { name: { contains: q, mode: "insensitive" } }),
+      ...(category && { category }),
+      price: { gte: minPrice, lte: maxPrice },
+    },
+    orderBy: [...orderBy[sort]],
+    take: limit + 1,                               // ✅ fetch 1 extra to know if there's a next page
+    ...(cursor && { cursor: { id: cursor }, skip: 1 }),
+    select: { id: true, name: true, price: true, image: true }, // ✅ only needed columns
+  });
+
+  const hasMore = items.length > limit;
+  const page = hasMore ? items.slice(0, -1) : items;
+  return Response.json({ items: page, nextCursor: hasMore ? page.at(-1)!.id : null });
+}
+```
+
+</Tab>
+<Tab label="Raw SQL">
+
+```sql
+-- Keyset (cursor) pagination: fast on page 1 and page 10,000
+SELECT id, name, price
+FROM products
+WHERE category = $1
+  AND price BETWEEN $2 AND $3
+  AND (created_at, id) < ($4, $5)   -- values from last row of previous page
+ORDER BY created_at DESC, id DESC
+LIMIT 21;
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's faster">
+- The **database filters with indexes** and returns ~20 rows instead of 200k.
+- **Cursor (keyset) pagination** jumps straight to the position. `OFFSET 100000` makes the DB read and discard 100k rows.
+- **`take: limit + 1`** tells you if there's a next page without a `COUNT(*)`.
+- **`select`** only the columns the UI shows, for a smaller payload.
+- **Zod** validation blocks bad input (e.g. `limit=999999`).
+</Callout>
+
+## How to use
+
+1. Define allowed filters with Zod and coerce numbers from query strings.
+2. Build the `where` object only from provided filters.
+3. Always sort by a **unique tiebreaker** (`id`) as well, or cursor pages can skip or duplicate rows.
+4. Return `{ items, nextCursor }`. The client passes `cursor=nextCursor` for the next page.
+5. Add DB indexes matching your filters + sort (see [SQL Indexes for Filters](/backend/sql-indexes)).
+
+## Use-case demos
+
+### Use case 1: infinite scroll client with TanStack Query
+
+```tsx
+const { data, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
+  queryKey: ["products", filters],
+  queryFn: ({ pageParam }) =>
+    fetch(`/api/products?${new URLSearchParams({ ...filters, ...(pageParam && { cursor: pageParam }) })}`)
+      .then((r) => r.json()),
+  initialPageParam: null as string | null,
+  getNextPageParam: (last) => last.nextCursor,
+});
+const products = data?.pages.flatMap((p) => p.items) ?? [];
+```
+
+### Use case 2: admin table with numbered pages (offset is fine here)
+
+```ts
+const [items, total] = await db.$transaction([
+  db.order.findMany({ where, orderBy: { createdAt: "desc" }, skip: (page - 1) * 25, take: 25 }),
+  db.order.count({ where }),
+]);
+return { items, total, pages: Math.ceil(total / 25) };
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- `contains` with `%q%` can't use a normal B-tree index. For real search use Postgres full-text search, `pg_trgm`, or Meilisearch/Algolia.
+- Cursor pagination can't jump to "page 37". Use offset for small admin tables that need page numbers.
+- Never build SQL by string-concatenating user input. Use parameters or the ORM.
+</Callout>

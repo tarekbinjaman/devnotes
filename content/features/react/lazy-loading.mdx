@@ -1,0 +1,140 @@
+---
+title: Lazy Loading & Code Splitting
+summary: Ship less JavaScript up front by loading heavy components, images and libraries only when needed.
+category: react
+difficulty: beginner
+tags: [performance, bundle, images, lazy]
+technologies: [next/dynamic, React.lazy, Suspense, next/image]
+updated: 2026-11-08
+---
+
+## What it is
+
+By default, every component you import goes into the page's JavaScript bundle, even a chart, map or rich-text editor the user may never open. **Code splitting** puts those in separate chunks that download only when rendered. **Lazy images** load only when they scroll into view.
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard">
+
+```tsx
+// ❌ The chart library (~200 KB) loads on first visit, even if hidden
+import RevenueChart from "@/components/RevenueChart";
+import MarkdownEditor from "@/components/MarkdownEditor";
+
+export default function Dashboard() {
+  const [showEditor, setShowEditor] = useState(false);
+  return (
+    <>
+      <RevenueChart />
+      <button onClick={() => setShowEditor(true)}>Write note</button>
+      {showEditor && <MarkdownEditor />}
+      <img src="/hero.jpg" />
+    </>
+  );
+}
+```
+
+</Tab>
+<Tab label="Optimized">
+
+```tsx
+import dynamic from "next/dynamic";
+import Image from "next/image";
+
+// ✅ Separate chunk, loaded when rendered; skeleton while loading
+const RevenueChart = dynamic(() => import("@/components/RevenueChart"), {
+  loading: () => <div className="h-64 animate-pulse rounded bg-zinc-200" />,
+  ssr: false, // chart libs often need `window`
+});
+const MarkdownEditor = dynamic(() => import("@/components/MarkdownEditor"));
+
+export default function Dashboard() {
+  const [showEditor, setShowEditor] = useState(false);
+  return (
+    <>
+      <RevenueChart />
+      <button onClick={() => setShowEditor(true)}>Write note</button>
+      {showEditor && <MarkdownEditor />}
+      {/* ✅ Resized, modern format (AVIF/WebP), lazy by default, no layout shift */}
+      <Image src="/hero.jpg" alt="Hero" width={1200} height={600} priority />
+    </>
+  );
+}
+```
+
+</Tab>
+<Tab label="Plain React (Vite)">
+
+```tsx
+import { lazy, Suspense } from "react";
+
+const Settings = lazy(() => import("./pages/Settings"));
+
+export function App() {
+  return (
+    <Suspense fallback={<Spinner />}>
+      <Routes>
+        <Route path="/settings" element={<Settings />} />
+      </Routes>
+    </Suspense>
+  );
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's faster">
+- **`next/dynamic` / `React.lazy`** split code at the import, so the first page load downloads less JS and becomes interactive sooner (better LCP/INP).
+- **`next/image`** serves correctly sized, compressed images and lazy-loads anything below the fold.
+- Use `priority` only on the **largest above-the-fold image** (your LCP element).
+</Callout>
+
+## How to use
+
+1. Find big dependencies: run `npx @next/bundle-analyzer` (or check the build output sizes).
+2. Wrap components that are heavy **and** not needed immediately (modals, charts, editors, maps) with `dynamic()`.
+3. Give each one a `loading` skeleton with the same size, to avoid layout shift.
+4. Replace `<img>` with `next/image`, always passing `width`/`height` (or `fill` + a sized parent).
+5. Load heavy libraries inside event handlers when possible: `const { jsPDF } = await import("jspdf")`.
+
+## Use-case demos
+
+### Use case 1: load a library only when a button is clicked
+
+```tsx
+async function exportPdf(rows: Row[]) {
+  const { default: jsPDF } = await import("jspdf"); // downloaded on first click only
+  const doc = new jsPDF();
+  rows.forEach((r, i) => doc.text(`${r.name}: ${r.total}`, 10, 10 + i * 8));
+  doc.save("report.pdf");
+}
+```
+
+### Use case 2: render a component only when it scrolls into view
+
+```tsx
+function LazyOnView({ children, height = 400 }: { children: React.ReactNode; height?: number }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const io = new IntersectionObserver(([e]) => e.isIntersecting && (setVisible(true), io.disconnect()), {
+      rootMargin: "200px",
+    });
+    if (ref.current) io.observe(ref.current);
+    return () => io.disconnect();
+  }, []);
+  return <div ref={ref} style={{ minHeight: height }}>{visible && children}</div>;
+}
+
+// <LazyOnView><CommentsSection /></LazyOnView>
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- Don't lazy-load what's visible on first paint (header, hero): that makes it **slower**.
+- Too many tiny chunks cause a waterfall of requests. Split big things, not every button.
+- `ssr: false` means no HTML for that part on the server, which is bad for SEO content.
+</Callout>

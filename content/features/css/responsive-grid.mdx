@@ -1,0 +1,119 @@
+---
+title: Responsive Card Grid
+summary: A grid that adapts to any screen with one line of CSS, with no media-query pile-up.
+category: css
+difficulty: beginner
+tags: [layout, grid, responsive, tailwind]
+technologies: [CSS Grid, auto-fill, minmax, container queries, Tailwind]
+updated: 2026-11-08
+---
+
+## What it is
+
+Card layouts (products, blog posts, dashboards) need 1 column on phones, 2 on tablets, 3–4 on desktop. The old way uses floats/flex with a media query per breakpoint. **CSS Grid with `auto-fill` + `minmax()`** figures out the column count automatically.
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard">
+
+```css
+/* ❌ Fixed breakpoints, margins math, breaks at in-between sizes */
+.cards { display: flex; flex-wrap: wrap; margin: -8px; }
+.card  { width: calc(100% - 16px); margin: 8px; }
+@media (min-width: 640px)  { .card { width: calc(50% - 16px); } }
+@media (min-width: 1024px) { .card { width: calc(33.333% - 16px); } }
+@media (min-width: 1280px) { .card { width: calc(25% - 16px); } }
+```
+
+</Tab>
+<Tab label="Optimized">
+
+```css
+/* ✅ As many columns as fit, each at least 260px, sharing leftover space */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
+  gap: 1rem;
+}
+```
+
+</Tab>
+<Tab label="Tailwind">
+
+```html
+<!-- ✅ Same idea with an arbitrary value -->
+<div class="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(min(260px,100%),1fr))]">
+  <article class="rounded-xl border p-4">…</article>
+</div>
+
+<!-- or explicit breakpoints when you want exact control -->
+<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">…</div>
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's better">
+- **`auto-fill` + `minmax`** calculates columns from the available width, so it works at every size, not just your breakpoints.
+- **`min(260px, 100%)`** prevents overflow on very narrow screens.
+- **`gap`** replaces negative-margin hacks.
+- It responds to the **container's** width, so the same grid works in a sidebar or full page.
+</Callout>
+
+## How to use
+
+1. Pick a minimum card width (220–300px is typical).
+2. Use `repeat(auto-fill, minmax(min(MIN, 100%), 1fr))`.
+3. Use `auto-fit` instead of `auto-fill` if you want few items to **stretch** to fill the row.
+4. For equal-height cards, make the card `display: flex; flex-direction: column` and push the footer with `margin-top: auto`.
+
+## Use-case demos
+
+### Use case 1: equal-height product cards with footer aligned
+
+```html
+<div class="cards">
+  <article class="card">
+    <img src="/p1.jpg" alt="" />
+    <h3>Product name that might wrap to two lines</h3>
+    <p class="price">$49</p>
+    <button>Add to cart</button>
+  </article>
+</div>
+
+<style>
+  .card { display: flex; flex-direction: column; gap: .5rem; }
+  .card img { aspect-ratio: 4 / 3; object-fit: cover; width: 100%; } /* no layout shift */
+  .card button { margin-top: auto; } /* buttons line up across the row */
+</style>
+```
+
+### Use case 2: card that changes layout based on its container (container queries)
+
+```css
+.card-wrap { container-type: inline-size; }
+
+.card { display: grid; gap: 1rem; }
+
+/* When the CARD (not the screen) is wider than 420px, go horizontal */
+@container (min-width: 420px) {
+  .card { grid-template-columns: 160px 1fr; }
+}
+```
+
+### Use case 3: dashboard with a featured tile spanning 2 columns
+
+```css
+.dashboard { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; }
+.tile--wide { grid-column: span 2; }
+@media (max-width: 520px) { .tile--wide { grid-column: auto; } }
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- `auto-fill` with very few items leaves empty tracks. Use `auto-fit` if you want them to stretch.
+- `span 2` items can cause overflow on phones. Reset them at small sizes.
+- Always set `aspect-ratio` on images to avoid layout shift (CLS).
+</Callout>

@@ -1,0 +1,152 @@
+---
+title: API Response Caching
+summary: Serve repeated API requests from cache (CDN, Redis, Next.js) instead of hitting the database every time.
+category: backend
+difficulty: intermediate
+tags: [cache, api, redis, cdn, nextjs]
+technologies: [Cache-Control, stale-while-revalidate, Redis, Next.js revalidate, revalidateTag]
+updated: 2026-11-08
+---
+
+## What it is
+
+Many API responses are the same for every user for a while (product list, blog posts, exchange rates, settings). Rebuilding them from the database on every request wastes time and money. **Caching** stores the response at one or more layers: **browser → CDN (Vercel Edge) → server memory/Redis → database**.
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard">
+
+```ts
+// ❌ Every request = DB query (+ 100–300 ms), even though data changes hourly
+export async function GET() {
+  const categories = await db.category.findMany({ include: { _count: true } });
+  return Response.json(categories);
+}
+```
+
+</Tab>
+<Tab label="Optimized (HTTP / CDN)">
+
+```ts
+// ✅ Vercel's CDN caches for 60 s, then serves stale while refreshing in background
+export async function GET() {
+  const categories = await db.category.findMany({ include: { _count: true } });
+  return Response.json(categories, {
+    headers: {
+      "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300",
+    },
+  });
+}
+```
+
+</Tab>
+<Tab label="Optimized (Redis)">
+
+```ts
+import { Redis } from "@upstash/redis";
+const redis = Redis.fromEnv();
+
+/** Cache-aside: try cache → else load + store with TTL */
+export async function cached<T>(key: string, ttlSec: number, load: () => Promise<T>): Promise<T> {
+  const hit = await redis.get<T>(key);
+  if (hit !== null) return hit;
+  const fresh = await load();
+  await redis.set(key, fresh, { ex: ttlSec });
+  return fresh;
+}
+
+export async function GET() {
+  const data = await cached("categories:v1", 300, () =>
+    db.category.findMany({ include: { _count: true } }),
+  );
+  return Response.json(data);
+}
+
+// On admin update: invalidate
+await redis.del("categories:v1");
+```
+
+</Tab>
+<Tab label="Next.js data cache">
+
+```ts
+import { unstable_cache, revalidateTag } from "next/cache";
+
+// ✅ Cached across requests, tagged for precise invalidation
+export const getCategories = unstable_cache(
+  () => db.category.findMany(),
+  ["categories"],
+  { revalidate: 3600, tags: ["categories"] },
+);
+
+// In a Server Action after editing:
+export async function updateCategory(id: string, data: FormData) {
+  "use server";
+  await db.category.update({ where: { id }, data: { name: String(data.get("name")) } });
+  revalidateTag("categories"); // ✅ next request gets fresh data
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's faster">
+- **`s-maxage`** lets the CDN answer in ~10–30 ms from a nearby edge location without running your function.
+- **`stale-while-revalidate`** means users never wait for a refresh. They get the cached copy while a new one is fetched in the background.
+- **Redis** shares the cache across all serverless instances (in-memory caches reset on every cold start).
+- **Tag-based invalidation** keeps data fresh immediately after edits, with no need for short TTLs.
+</Callout>
+
+## How to use
+
+1. Decide how stale data may be (seconds? minutes? hours?).
+2. **Public** data → `Cache-Control: public, s-maxage=…, stale-while-revalidate=…`.
+3. **User-specific** data → never public-cache. Use `private, max-age=0` or cache per-user keys in Redis.
+4. Put a version in cache keys (`categories:v1`) so changing the shape doesn't serve old formats.
+5. Invalidate on writes (`redis.del`, `revalidateTag`, `revalidatePath`).
+
+## Use-case demos
+
+### Use case 1: rate-limited third-party API (exchange rates)
+
+```ts
+export async function getRates() {
+  return cached("fx:usd", 600, async () => {
+    const r = await fetch("https://api.example.com/latest?base=USD");
+    if (!r.ok) throw new Error("FX API failed");
+    return r.json();
+  });
+}
+// 1 external call per 10 minutes, no matter how much traffic you get
+```
+
+### Use case 2: Next.js fetch with time-based revalidation
+
+```ts
+// Server Component
+const posts = await fetch("https://cms.example.com/posts", {
+  next: { revalidate: 300, tags: ["posts"] },
+}).then((r) => r.json());
+```
+
+### Use case 3: ETag for conditional requests (saves bandwidth)
+
+```ts
+import { createHash } from "node:crypto";
+
+export async function GET(req: Request) {
+  const body = JSON.stringify(await getSettings());
+  const etag = `"${createHash("sha1").update(body).digest("base64url")}"`;
+  if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304 });
+  return new Response(body, { headers: { ETag: etag, "Content-Type": "application/json" } });
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Never** public-cache responses that depend on cookies/auth. You could show one user's data to another.
+- Cache stampede: when a hot key expires, many requests hit the DB at once. `stale-while-revalidate` or a lock helps.
+- Caching hides bugs in dev. Use short TTLs locally, or a way to bypass the cache.
+</Callout>

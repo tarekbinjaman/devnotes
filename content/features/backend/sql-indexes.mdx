@@ -1,0 +1,131 @@
+---
+title: SQL Indexes for Filters
+summary: Make filter and sort queries go from seconds to milliseconds with the right (composite) indexes.
+category: backend
+difficulty: intermediate
+tags: [database, sql, postgres, index, performance]
+technologies: [PostgreSQL, B-tree index, Composite index, EXPLAIN ANALYZE, Prisma]
+updated: 2026-11-08
+---
+
+## What it is
+
+Without an index, `WHERE category = 'shoes'` makes the database read **every row** (a "Seq Scan"). An **index** is a sorted lookup structure (like a book's index) that finds matching rows directly. The right index can make a query **100–1000× faster**.
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard">
+
+```sql
+-- ❌ No indexes besides the primary key
+CREATE TABLE products (
+  id          uuid PRIMARY KEY,
+  category    text,
+  price       numeric,
+  is_active   boolean,
+  created_at  timestamptz
+);
+
+-- This scans all 2M rows:
+SELECT * FROM products
+WHERE category = 'shoes' AND is_active
+ORDER BY created_at DESC
+LIMIT 20;
+-- Seq Scan on products  (actual time=0.02..812.4 ms)
+```
+
+</Tab>
+<Tab label="Optimized">
+
+```sql
+-- ✅ Composite index matching WHERE (equality first) then ORDER BY
+CREATE INDEX CONCURRENTLY idx_products_cat_active_created
+  ON products (category, created_at DESC)
+  WHERE is_active;            -- ✅ partial index: only active rows → smaller & faster
+
+-- Same query now:
+-- Index Scan using idx_products_cat_active_created  (actual time=0.03..0.21 ms)
+
+-- ✅ Range filter on price within a category
+CREATE INDEX idx_products_cat_price ON products (category, price);
+
+-- ✅ Case-insensitive search by email
+CREATE INDEX idx_users_email_lower ON users (lower(email));
+-- query must use the same expression:  WHERE lower(email) = lower($1)
+```
+
+</Tab>
+<Tab label="Prisma schema">
+
+```prisma
+model Product {
+  id        String   @id @default(cuid())
+  category  String
+  price     Decimal
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@index([category, createdAt(sort: Desc)])
+  @@index([category, price])
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's faster">
+- A **B-tree index** finds rows in O(log n) instead of scanning all n rows.
+- A **composite index `(category, created_at)`** handles both the filter **and** the sort, with no separate sort step.
+- **Column order matters**: equality columns first, then range/sort columns.
+- **Partial indexes** (`WHERE is_active`) are smaller and only cover the rows you actually query.
+- **`CONCURRENTLY`** builds the index without locking writes in production.
+</Callout>
+
+## How to use
+
+1. Find slow queries (Postgres: `pg_stat_statements`, or your ORM's query logs).
+2. Run `EXPLAIN ANALYZE <query>` and look for `Seq Scan` on big tables.
+3. Create an index on the columns in `WHERE` (equality first), then `ORDER BY`.
+4. Run `EXPLAIN ANALYZE` again and confirm `Index Scan` and a lower time.
+5. Index foreign keys used in joins (`orders.user_id`). Postgres does **not** do this automatically.
+
+## Use-case demos
+
+### Use case 1: reading EXPLAIN output
+
+```sql
+EXPLAIN ANALYZE
+SELECT id, total FROM orders WHERE user_id = 'u_123' ORDER BY created_at DESC LIMIT 10;
+
+-- Before:  Seq Scan on orders  (rows=1,800,000) ... Execution Time: 640 ms
+CREATE INDEX idx_orders_user_created ON orders (user_id, created_at DESC);
+-- After:   Index Scan using idx_orders_user_created ... Execution Time: 0.09 ms
+```
+
+### Use case 2: fast "contains" search with trigram index
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX idx_products_name_trgm ON products USING gin (name gin_trgm_ops);
+
+-- Now ILIKE '%shoe%' can use the index
+SELECT id, name FROM products WHERE name ILIKE '%shoe%' LIMIT 20;
+```
+
+### Use case 3: covering index (no table lookup at all)
+
+```sql
+CREATE INDEX idx_orders_status_cover ON orders (status) INCLUDE (total, created_at);
+-- SELECT total, created_at FROM orders WHERE status = 'paid'
+-- → "Index Only Scan" (reads only the index)
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- Every index **slows down writes** (INSERT/UPDATE) and uses disk. Don't index every column.
+- Low-selectivity columns alone (`is_active` with 99% true) rarely benefit. Use them as a partial index condition instead.
+- Wrapping a column in a function (`WHERE date(created_at) = ...`) prevents the index unless you create an expression index.
+- Index `(a, b)` helps `WHERE a = ?` and `WHERE a = ? AND b = ?`, but **not** `WHERE b = ?` alone.
+</Callout>
