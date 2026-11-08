@@ -2,7 +2,7 @@
 title: Context API
 summary: Share state across many components without passing props through every level.
 category: fundamentals
-order: 12
+order: 17
 difficulty: intermediate
 tags: [context, state-management, prop-drilling, theme, auth]
 technologies: [createContext, useContext, Provider, useMemo]
@@ -154,3 +154,58 @@ export const useCart = () => useContext(CartStateCtx)!;
 - High-frequency values (mouse position, input text) in context re-render every consumer. Keep them local or use a store with selectors (Zustand).
 - React 19 lets you write `<ThemeCtx value={…}>` instead of `<ThemeCtx.Provider value={…}>`.
 </Callout>
+
+## Interview questions
+
+<QA q="What problem does Context solve, and what is it not?" level="junior">
+
+Context lets a component deep in the tree read a value from an ancestor provider without every intermediate component passing it as a prop (prop drilling). Good fits are values many components need that change rarely: theme, locale, current user, a feature-flag client. Context is a **dependency-injection mechanism, not a state manager**: it doesn't store anything itself; you usually hold the state with `useState` or `useReducer` in the provider component.
+
+</QA>
+
+<QA q="What happens to consumers when the context value changes?" level="junior">
+
+Every component that reads that context with `useContext` (or `use`) re-renders when the provider's `value` changes, compared with `Object.is`. `memo` on a consumer doesn't prevent it, because the update comes from the context, not from props. React finds consumers anywhere below the provider, even if components in between skipped rendering.
+
+</QA>
+
+<QA q="What's wrong with this provider?" level="mid">
+
+```tsx
+function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
+  return (
+    <AuthContext.Provider value={{ user, login: (u: User) => setUser(u) }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+```
+
+The `value` is a new object (with a new `login` function) every time `AuthProvider` renders, so all consumers re-render even when `user` didn't change. Memoize it: wrap `login` in `useCallback` and the object in `useMemo` with `[user, login]` as dependencies.
+
+</QA>
+
+<QA q="How would you reduce re-renders in an app that keeps everything in one big context?" level="mid">
+
+Split it into multiple contexts by how often values change and who uses them (for example `ThemeContext`, `AuthContext`, `CartContext`), and separate state from actions (a state context and a dispatch context). Memoize each provider's `value`. Keep fast-changing values like input text or mouse position local. If many components need slices of frequently changing shared state, switch to a store with selectors (Zustand, Redux Toolkit, Jotai), which re-renders only components whose selected slice changed.
+
+</QA>
+
+<QA q="What is the default value in createContext for?" level="mid">
+
+It's what `useContext` returns when there is no matching provider above the component. It's useful for tests and for components rendered outside the provider. A common pattern is to use `null` as the default and write a custom hook (`useAuth`) that throws a clear error if the value is `null`, so a missing provider is caught immediately instead of failing silently later.
+
+</QA>
+
+<QA q="Context vs prop drilling vs composition: which do you reach for first?" level="senior">
+
+For 1 to 2 levels, plain props: explicit and easy to trace. If you're drilling through layout components that don't care about the data, try composition first: have the owner render the deep child and pass it down as `children` or a slot prop, so the middle layers never touch the data. Use Context when many components at different depths need the same value. Overusing Context makes components harder to reuse and test because they depend on an invisible provider.
+
+</QA>
+
+<QA q="How does Context work with Next.js App Router and Server Components?" level="senior">
+
+Context is a client-side feature: Server Components can't create or read context. You create the provider in a file marked `'use client'`, then render it in a Server Component layout, wrapping `children`. The children can still be Server Components, because they are rendered on the server and passed through as props. Keep providers as deep in the tree as possible so less of the app needs to be client code.
+
+</QA>

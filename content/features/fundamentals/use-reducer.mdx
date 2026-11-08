@@ -2,7 +2,7 @@
 title: useReducer
 summary: Manage complex state with explicit actions and a pure reducer function instead of many setState calls.
 category: fundamentals
-order: 11
+order: 16
 difficulty: intermediate
 tags: [hooks, useReducer, state-management, typescript]
 technologies: [useReducer, Reducer pattern, Discriminated unions, dispatch]
@@ -162,3 +162,57 @@ function wizard(s: WizardState, a: WizardAction): WizardState {
 - Side effects inside a reducer run twice in Strict Mode. Keep them out.
 - App-wide complex state with many consumers may be better in **Zustand** or **Redux Toolkit**.
 </Callout>
+
+## Interview questions
+
+<QA q="When would you choose useReducer over useState?" level="junior">
+
+When state has several related values that change together, when the next state depends on the previous one in non-trivial ways, or when many different events update the same state (a form wizard, a cart, a data table with filters and paging). A reducer puts all the update logic in one pure function that's easy to read and test, and components just describe **what happened** by dispatching actions. For one or two independent values, `useState` is simpler.
+
+</QA>
+
+<QA q="What makes a reducer 'pure', and why does it matter?" level="junior">
+
+A pure reducer computes the next state only from the current state and the action: no mutation of the old state, no API calls, no random values, no `Date.now()`. React may call it more than once (Strict Mode does in development), so side effects would run twice. Purity also makes reducers trivial to unit test: call it with a state and an action and assert on the result.
+
+</QA>
+
+<QA q="What's wrong with this reducer?" level="mid">
+
+```ts
+function reducer(state: State, action: Action) {
+  switch (action.type) {
+    case "added":
+      state.items.push(action.item);
+      return state;
+  }
+}
+```
+
+It mutates the existing state and returns the same reference, so React sees no change and may not re-render. It also has no default case, so unknown actions return `undefined`. Return a new object (`return { ...state, items: [...state.items, action.item] }`) and add a default that returns `state` or throws for unknown types.
+
+</QA>
+
+<QA q="How do you type actions in TypeScript?" level="mid">
+
+Use a discriminated union, for example `type Action = { type: 'added'; item: Item } | { type: 'removed'; id: string }`. In each `case` of the `switch`, TypeScript narrows `action` so you can only access the payload that action has. Adding a `never` check in the default case makes the compiler complain when you add an action type but forget to handle it.
+
+</QA>
+
+<QA q="Where do side effects like API calls go when you use a reducer?" level="mid">
+
+Outside the reducer: in event handlers or effects. A typical flow is: dispatch a 'fetch started' action, make the request in the handler or effect, then dispatch 'fetch succeeded' or 'fetch failed' with the result. The reducer only describes how state changes in response to each of those events. Libraries like Redux Toolkit add thunks for this, but the principle is the same.
+
+</QA>
+
+<QA q="useReducer + Context vs Redux Toolkit or Zustand: how do you choose?" level="senior">
+
+`useReducer` plus Context is built in and good for state scoped to a feature or a moderately sized app. Its weakness is that every consumer of the state context re-renders on any change, because Context has no selectors. Redux Toolkit adds selectors, DevTools with time travel, middleware and RTK Query for server data; Zustand gives selector-based subscriptions with very little boilerplate. Pick the library when state is large, shared across the app and updated often, or when you need its tooling.
+
+</QA>
+
+<QA q="Why put dispatch in its own context?" level="senior">
+
+`dispatch` from `useReducer` has a stable identity for the lifetime of the component. If you provide state and dispatch in separate contexts, components that only dispatch actions (buttons, forms) subscribe only to the dispatch context and never re-render when state changes. It's a cheap, effective way to reduce re-renders with the reducer + context pattern.
+
+</QA>

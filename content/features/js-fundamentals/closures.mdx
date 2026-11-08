@@ -1,0 +1,287 @@
+---
+title: Closures & Scope
+summary: Functions remember the variables from the place they were written, which powers private state, callbacks and every React hook.
+category: js-fundamentals
+order: 1
+difficulty: intermediate
+tags: [closures, scope, hoisting, stale-closure, hooks]
+technologies: [JavaScript, let/const, IIFE, ES modules, useEffect, useCallback]
+updated: 2026-11-08
+---
+
+## What it is
+
+**Scope** decides where a variable is visible. JavaScript uses **lexical scope**: what a function can see depends on *where it was written*, not where it is called.
+
+A **closure** is a function plus the variables it captured from its surrounding scope. The function keeps those variables alive even after the outer function has returned.
+
+| Scope | Created by | Example |
+| --- | --- | --- |
+| Global / module | the file | top-level `const API_URL` |
+| Function | every function | `var`, parameters, inner `let/const` |
+| Block | `{ }` of `if`, `for`, plain blocks | `let` and `const` only |
+
+Closures are everywhere: event handlers, `setTimeout` callbacks, `debounce`, memoization, and every React component (each render is a function call whose handlers close over that render's props and state).
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```ts
+// ❌ var is function-scoped: all three callbacks share ONE i
+for (var i = 0; i < 3; i++) {
+  setTimeout(() => console.log(i), 0); // 3, 3, 3
+}
+
+// ❌ Stale closure in React: the interval captured count = 0 forever
+function Timer() {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setCount(count + 1), 1000); // always 0 + 1
+    return () => clearInterval(id);
+  }, []); // effect never re-runs, so the callback never sees new count
+  return <p>{count}</p>; // stuck at 1
+}
+```
+
+</Tab>
+<Tab label="Correct">
+
+```ts
+// ✅ let creates a fresh binding per iteration
+for (let i = 0; i < 3; i++) {
+  setTimeout(() => console.log(i), 0); // 0, 1, 2
+}
+
+// ✅ Functional update: no need to read count from the closure
+function Timer() {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setCount((c) => c + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return <p>{count}</p>; // 1, 2, 3, ...
+}
+```
+
+</Tab>
+<Tab label="Ref for latest value">
+
+```ts
+// ✅ When the callback must READ fresh values (not just update), keep them in a ref
+function useLatest<T>(value: T) {
+  const ref = useRef(value);
+  useEffect(() => { ref.current = value; });
+  return ref;
+}
+
+function AutoSave({ draft }: { draft: string }) {
+  const latest = useLatest(draft);
+  useEffect(() => {
+    const id = setInterval(() => save(latest.current), 5000); // always the newest draft
+    return () => clearInterval(id);
+  }, [latest]);
+  return null;
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why this happens">
+- A closure captures the **variable binding**, not a snapshot of the value. With `var` there is a single binding for the whole loop, so every callback reads its final value.
+- `let` in a `for` header creates a **new binding per iteration**, so each callback gets its own `i`.
+- A React render is a function call. The callback created in render #1 closes over render #1's `count`. If the effect never re-runs, it never gets a newer closure. That's a **stale closure**.
+</Callout>
+
+## How it works
+
+When a function is created, the engine stores a hidden link to the scope it was created in. Variable lookup walks this **scope chain** outward until it finds the name (or throws `ReferenceError`).
+
+```text
+Global scope            { makeCounter, a }
+  └─ makeCounter()      { count }        <- kept alive while `a` exists
+       └─ inc()         { }              looks up `count` -> found one level out
+```
+
+```ts
+function makeCounter() {
+  let count = 0;                 // private: nothing outside can touch it
+  return { inc: () => ++count, get: () => count };
+}
+const a = makeCounter();
+a.inc(); a.inc();
+a.get(); // 2
+```
+
+Related rules worth knowing:
+- `var` declarations are **hoisted** and initialized to `undefined`. `let`/`const` are hoisted too but sit in the **temporal dead zone** until their line runs, so accessing them early throws.
+- An **IIFE** (`(function () { ... })()`) creates a scope immediately. Before `let` and ES modules, it was the only way to get private variables or a per-iteration copy.
+- The **module pattern** returns an object of functions that close over private state. ES modules give you the same thing for free: anything not exported is private.
+
+## Use-case demos
+
+### Use case 1: private state with a factory (module pattern)
+
+```ts
+function createCache<T>(ttlMs: number) {
+  const store = new Map<string, { value: T; expires: number }>(); // private
+
+  return {
+    get(key: string) {
+      const hit = store.get(key);
+      if (!hit || hit.expires < Date.now()) return undefined;
+      return hit.value;
+    },
+    set(key: string, value: T) {
+      store.set(key, { value, expires: Date.now() + ttlMs });
+    },
+  };
+}
+
+const userCache = createCache<User>(60_000);
+```
+
+### Use case 2: debounce keeps its timer in a closure
+
+```ts
+function debounce<A extends unknown[]>(fn: (...args: A) => void, ms: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined; // survives between calls
+  return (...args: A) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
+
+const onSearch = debounce((q: string) => fetchResults(q), 300);
+```
+
+In a component, create it once (`useMemo` or `useRef`), otherwise each render makes a new closure with a new timer.
+
+### Use case 3: stale closure in useCallback
+
+```tsx
+// ❌ deps are missing: handleSave always sends the first title
+const handleSave = useCallback(() => api.save({ title }), []);
+
+// ✅ list what the closure reads, so a fresh function is created when it changes
+const handleSave = useCallback(() => api.save({ title }), [title]);
+```
+
+The exhaustive-deps lint rule exists exactly to catch stale closures. See [useEffect](/fundamentals/use-effect) and [useCallback](/fundamentals/use-callback).
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Stale closures** in effects, intervals and memoized callbacks. Fix with correct deps, functional updates, or a ref holding the latest value.
+- **Memory leaks**: a long-lived closure (global listener, interval, cache) keeps everything it references alive. Always clean up listeners and timers.
+- Don't silence the exhaustive-deps lint with an empty array "to run once" if the callback reads props or state.
+- Creating closures in render is cheap. Don't wrap every handler in `useCallback`; do it only when a memoized child or an effect depends on the function identity.
+</Callout>
+
+## Interview questions
+
+<QA q="What is a closure, in one or two sentences?" level="junior">
+
+A closure is a function bundled with references to the variables of the scope where it was defined. It can keep reading and updating those variables even after the outer function has returned, for example a counter function that keeps a private `count`.
+
+</QA>
+
+<QA q="What does this code print and why?" level="junior">
+
+```js
+for (var i = 0; i < 3; i++) setTimeout(() => console.log('var', i), 0);
+for (let j = 0; j < 3; j++) setTimeout(() => console.log('let', j), 0);
+```
+
+Output:
+
+```text
+var 3
+var 3
+var 3
+let 0
+let 1
+let 2
+```
+
+The timers only run after the loops finish. `var i` is a single function-scoped binding, so all three callbacks read its final value `3`. `let j` gets a new binding per iteration, so each callback has its own copy.
+
+</QA>
+
+<QA q="What does this code print and why?" level="mid">
+
+```js
+var x = 1;
+function f() {
+  console.log(x);
+  var x = 2;
+}
+f();
+```
+
+It prints `undefined`. The `var x` inside `f` is hoisted to the top of `f` and initialized to `undefined`, so it **shadows** the outer `x` for the whole function. If it were `let x = 2`, the log would throw `ReferenceError` because of the temporal dead zone.
+
+</QA>
+
+<QA q="What does this code print?" level="junior">
+
+```js
+function makeCounter() {
+  let count = 0;
+  return { inc: () => ++count, get: () => count };
+}
+const a = makeCounter();
+const b = makeCounter();
+a.inc(); a.inc(); b.inc();
+console.log(a.get(), b.get());
+```
+
+It prints `2 1`. Every call to `makeCounter` creates a **new scope** with its own `count`, so `a` and `b` have independent private state.
+
+</QA>
+
+<QA q='How would you fix the var-in-a-loop problem without using let?' level="mid">
+
+Use an IIFE to create a new scope per iteration and pass the current value in as a parameter:
+
+```js
+for (var i = 0; i < 3; i++) {
+  (function (n) {
+    setTimeout(() => console.log(n), 0);
+  })(i);
+}
+```
+
+This prints `0 1 2`. Passing `i` as an extra argument to `setTimeout` (`setTimeout(console.log, 0, i)`) also works.
+
+</QA>
+
+<QA q='What is a stale closure in React and how do you fix it?' level="mid">
+
+A stale closure is a callback that captured props or state from an old render and keeps using those old values. Classic case: `setInterval(() => setCount(count + 1), 1000)` inside an effect with `[]` deps, which is stuck at `1`. Fixes:
+
+- Use a **functional update** (`setCount(c => c + 1)`) when you only need the previous state.
+- Add the value to the **dependency array** so a fresh closure is created.
+- Store the latest value in a **ref** when a long-lived callback must read it without re-subscribing.
+
+</QA>
+
+<QA q='Why does a React component that reads state inside an event handler see the value from that render?' level="senior">
+
+Each render is a separate call of the component function. `count` in that call is a plain constant, and the handler created during that render closes over it. Calling `setCount` schedules a new render with a new `count`, but the already-running handler still holds the old one. That is why `setCount(count + 1); console.log(count)` logs the old value, and why `setCount(c => c + 1)` is needed when you call it several times in a row.
+
+</QA>
+
+<QA q='Can closures cause memory leaks?' level="senior">
+
+Yes. A closure keeps every variable it references alive for as long as the closure itself is reachable. A `window` listener, an interval or a module-level cache that captures a large object (or a DOM node, or component state) prevents garbage collection. In React, return a cleanup function from `useEffect` that removes listeners and clears timers, and avoid capturing large objects in long-lived callbacks.
+
+</QA>
+
+<QA q='What is the difference between lexical and dynamic scope, and which does JavaScript use?' level="mid">
+
+With **lexical scope**, the variables a function can see are decided by where it is written in the source. With **dynamic scope**, they would depend on who called it. JavaScript variables are lexically scoped. The one thing that behaves dynamically is `this` in regular functions, which depends on how the function is called (arrow functions take `this` lexically).
+
+</QA>

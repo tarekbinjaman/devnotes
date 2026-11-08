@@ -117,3 +117,47 @@ Card layouts (products, blog posts, dashboards) need 1 column on phones, 2 on ta
 - `span 2` items can cause overflow on phones. Reset them at small sizes.
 - Always set `aspect-ratio` on images to avoid layout shift (CLS).
 </Callout>
+
+## Interview questions
+
+<QA q="Explain repeat(auto-fill, minmax(250px, 1fr))." level="junior">
+
+`repeat(auto-fill, ...)` creates as many columns as fit in the container. `minmax(250px, 1fr)` says each column is at least 250px wide and otherwise shares the remaining space equally. Together, the grid shows four columns on a wide screen, then three, two and one as space shrinks, with no media queries. A common refinement is `minmax(min(250px, 100%), 1fr)` so a single column never overflows on very narrow screens.
+
+</QA>
+
+<QA q="What is the difference between auto-fill and auto-fit?" level="mid">
+
+Both create as many tracks as fit. The difference shows when there are fewer items than tracks: `auto-fill` keeps the empty tracks, so items stay at their column width and leave space at the end; `auto-fit` collapses empty tracks to zero, so the existing items stretch to fill the row. Use `auto-fill` for consistent card sizes and `auto-fit` when a few items should fill the width.
+
+</QA>
+
+<QA q="CSS Grid vs Flexbox: when do you use which?" level="junior">
+
+Flexbox is one-dimensional: it lays items out in a row **or** a column and is great for toolbars, nav bars and centering. Grid is two-dimensional: it controls rows **and** columns together, which suits page layouts and card grids where items should line up in both directions. A common rule: Flexbox for content-driven layouts inside components, Grid for layout-driven structure. They're often combined (a grid of cards, each card using flex inside).
+
+</QA>
+
+<QA q="What are container queries, and why are they useful for components?" level="mid">
+
+Media queries respond to the **viewport** size; container queries respond to the size of a parent container. You mark a parent with `container-type: inline-size` and then use `@container (min-width: 400px)` rules for its children. That lets a card switch from stacked to side-by-side depending on where it's placed (sidebar vs main area), making components truly reusable. They're supported in all modern browsers.
+
+</QA>
+
+<QA q="How do you make cards in a row equal height with their buttons aligned at the bottom?" level="mid">
+
+Grid rows already stretch items to the same height (`align-items: stretch` is the default). Inside each card, use `display: flex; flex-direction: column` and give the footer `margin-top: auto`, which pushes it to the bottom. For aligning internal parts (title, image, text) across cards in the same row, use `grid-template-rows: subgrid` on the card so it shares the parent grid's row tracks.
+
+</QA>
+
+<QA q="Images in the grid cause the page to jump while loading. Why, and how do you fix it?" level="mid">
+
+Before an image loads, the browser doesn't know its height, so it reserves no space; when it arrives, content below shifts. That's Cumulative Layout Shift (CLS), a Core Web Vital. Set `width` and `height` attributes on `img` (modern browsers derive an aspect ratio from them) or use `aspect-ratio` in CSS plus `object-fit: cover`. `next/image` requires dimensions or a fill container for the same reason.
+
+</QA>
+
+<QA q="What accessibility issue can CSS Grid introduce?" level="senior">
+
+Grid lets you visually reorder items with `order`, `grid-area`, or `grid-auto-flow: dense`, but screen readers and keyboard focus still follow the **DOM order**. If the visual order differs, keyboard users jump around unpredictably, which fails WCAG's meaningful sequence and focus order criteria. Keep the source order logical and use visual reordering only for decorative changes.
+
+</QA>

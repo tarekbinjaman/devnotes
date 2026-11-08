@@ -1,0 +1,299 @@
+---
+title: this, bind, call & apply
+summary: this is decided by how a function is called, not where it is defined, unless it is an arrow function, which borrows this from its surrounding scope.
+category: js-fundamentals
+order: 4
+difficulty: intermediate
+tags: [this, bind, call, apply, arrow-functions, classes]
+technologies: [JavaScript, Function.prototype.bind, call, apply, class fields, arrow functions]
+updated: 2026-11-08
+---
+
+## What it is
+
+`this` is a hidden parameter that every regular function receives. Its value is set **at call time** by the way the function is called. Arrow functions are the exception: they have no own `this` and use the `this` of the scope where they were written.
+
+The binding rules, highest priority first:
+
+| Rule | Call looks like | `this` is |
+| --- | --- | --- |
+| `new` binding | `new User()` | the newly created object |
+| Explicit binding | `fn.call(obj)`, `fn.apply(obj)`, `fn.bind(obj)` | `obj` |
+| Implicit binding | `obj.method()` | `obj` (the thing left of the dot) |
+| Default binding | `fn()` | `undefined` in strict mode / modules / classes, `globalThis` in sloppy scripts |
+| Arrow function | `() => this` | inherited from the enclosing scope, cannot be changed |
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```ts
+class Uploader {
+  progress = 0;
+
+  start() {
+    // ❌ Regular function callback: called as a plain function, this is undefined
+    setInterval(function () {
+      this.progress += 10; // TypeError: Cannot read properties of undefined
+    }, 100);
+  }
+
+  onDone() {
+    console.log("done at", this.progress);
+  }
+}
+
+const up = new Uploader();
+// ❌ Passing a method loses its object: this is undefined inside onDone
+button.addEventListener("click", up.onDone); // this === button for DOM listeners, also wrong
+const { onDone } = up;
+onDone(); // TypeError
+```
+
+</Tab>
+<Tab label="Correct">
+
+```ts
+class Uploader {
+  progress = 0;
+
+  start() {
+    // ✅ Arrow function inherits this from start()
+    setInterval(() => {
+      this.progress += 10;
+    }, 100);
+  }
+
+  // ✅ Class field arrow: this is bound to the instance forever
+  onDone = () => {
+    console.log("done at", this.progress);
+  };
+}
+
+const up = new Uploader();
+button.addEventListener("click", up.onDone);        // works
+button.addEventListener("click", () => up.onDone()); // also works: called with a dot
+
+// ✅ Or bind explicitly
+const report = function (this: Uploader) { return this.progress; }.bind(up);
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why this breaks">
+- `obj.method` is just a reference to a function. The object is only attached when you **call** it with a dot: `obj.method()`.
+- Passing `obj.method` as a callback (to `setTimeout`, an event listener, `array.map` or a prop) means someone else calls it as a plain function, so the implicit binding is lost.
+- Class bodies are always strict mode, so lost `this` is `undefined` and you get a loud `TypeError` instead of silently touching `window`.
+- Arrow functions and `bind` fix `this` at creation time, so the call site no longer matters.
+</Callout>
+
+## How it works
+
+Ask one question: **how is the function being called?**
+
+```text
+Is it an arrow function?        → this from the surrounding scope (stop)
+Called with new?                → the new object
+Called via call/apply/bind?     → the first argument
+Called as obj.fn()?             → obj
+Otherwise                       → undefined (strict) or globalThis (sloppy)
+```
+
+`call`, `apply` and `bind` all set `this` explicitly:
+
+```ts
+function greet(this: { name: string }, greeting: string, punct: string) {
+  return `${greeting}, ${this.name}${punct}`;
+}
+const ada = { name: "Ada" };
+
+greet.call(ada, "Hi", "!");          // args one by one  → "Hi, Ada!"
+greet.apply(ada, ["Hello", "?"]);    // args as an array → "Hello, Ada?"
+const hiAda = greet.bind(ada, "Hi"); // returns a NEW function, can pre-fill args
+hiAda(".");                          // "Hi, Ada."
+```
+
+A bound function's `this` is permanent: calling `call`, `apply` or `bind` on it again cannot change it. Only `new` overrides a `bind`.
+
+## Use-case demos
+
+### Use case 1: why React function components avoid this
+
+```tsx
+// Class component: you had to manage this
+class Counter extends React.Component<{}, { count: number }> {
+  state = { count: 0 };
+  constructor(props: {}) {
+    super(props);
+    this.handleClick = this.handleClick.bind(this); // classic boilerplate
+  }
+  handleClick() {
+    this.setState((s) => ({ count: s.count + 1 }));
+  }
+  render() {
+    return <button onClick={this.handleClick}>{this.state.count}</button>;
+  }
+}
+
+// Function component: no this at all. Handlers are closures over props and state.
+function CounterFn() {
+  const [count, setCount] = useState(0);
+  return <button onClick={() => setCount((c) => c + 1)}>{count}</button>;
+}
+```
+
+React calls your handler as a plain function, so a class method needs binding. Function components replace `this.state`/`this.props` with **closures**, which removes a whole category of bugs (and introduces stale closures instead; see [Closures & Scope](/js-fundamentals/closures)).
+
+### Use case 2: borrowing methods with call
+
+```ts
+function logArgs() {
+  // arguments is array-like, not an array
+  const args = Array.prototype.slice.call(arguments);
+  console.log(args.join(", "));
+}
+
+const max = Math.max.apply(null, [3, 9, 4]); // 9 (today: Math.max(...arr))
+```
+
+### Use case 3: wrapping a third-party SDK method
+
+```ts
+// ❌ Detaching the method loses the SDK instance
+const track = analytics.track;
+track("signup"); // TypeError inside the SDK: this is undefined
+
+// ✅ Bind it once and pass it around freely
+const trackEvent = analytics.track.bind(analytics);
+export const useTrack = () => trackEvent;
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Don't use arrow functions as object methods** when you need `this`: `{ name: "x", getName: () => this.name }` reads the outer `this`, not the object.
+- **Arrow functions can't be constructors** and ignore `call`/`apply`/`bind` for `this`.
+- Class-field arrows create one function **per instance** (fine for components, wasteful for millions of objects) and are not on the prototype, so subclasses can't call `super.method()`.
+- `bind` in render (`onClick={this.handle.bind(this)}`) creates a new function every render, breaking `memo` children. Bind once in the constructor or use a class-field arrow.
+- In DOM listeners with a regular function, `this` is the element (`event.currentTarget`). Prefer `event.currentTarget` for clarity.
+</Callout>
+
+## Interview questions
+
+<QA q="What does this code print and why?" level="mid">
+
+```js
+class Button {
+  label = 'Save';
+  click() { console.log(this?.label); }
+  clickArrow = () => console.log(this.label);
+}
+const btn = new Button();
+const { click, clickArrow } = btn;
+click();
+clickArrow();
+```
+
+Output:
+
+```text
+undefined
+Save
+```
+
+Destructuring copies the function references off the object. `click` is a prototype method, now called as a plain function; class code is strict, so `this` is `undefined` and `this?.label` is `undefined` (without `?.` it would throw). `clickArrow` is a class field arrow function created in the constructor, so its `this` is permanently the instance.
+
+</QA>
+
+<QA q="What does this code print? (bind, call and apply together)" level="senior">
+
+```js
+function show() { return this.x; }
+const A = { x: 1 };
+const B = { x: 2, show };
+const bound = show.bind(A);
+console.log(bound.call(B), bound.bind(B)(), B.show(), show.call(B), show.apply(A));
+```
+
+Output:
+
+```text
+1 1 2 2 1
+```
+
+A bound function's `this` is fixed forever, so `bound.call(B)` and re-binding to `B` still return `1`. `B.show()` uses implicit binding (`2`), `show.call(B)` explicit binding (`2`), and `show.apply(A)` explicit binding (`1`).
+
+</QA>
+
+<QA q="What does this print when run as an ES module?" level="mid">
+
+```js
+const user = {
+  name: 'Ada',
+  regular() { return this.name; },
+  arrow: () => typeof this,
+  later() { return [1].map(function () { return this; })[0]; },
+  laterArrow() { return [1].map(() => this.name)[0]; },
+};
+console.log(user.regular(), user.arrow(), user.later(), user.laterArrow());
+```
+
+Output:
+
+```text
+Ada undefined undefined Ada
+```
+
+`regular` is called as `user.regular()`, so `this` is `user`. `arrow` takes `this` from the module scope, which is `undefined` in ES modules, so `typeof this` is the string `undefined`. The regular callback inside `later` is called by `map` as a plain function (strict module code), so it returns `undefined`. The arrow in `laterArrow` inherits `this` from `laterArrow`, which is `user`.
+
+</QA>
+
+<QA q='What are the rules that determine the value of this?' level="junior">
+
+In priority order: `new` makes `this` the new object; `call`, `apply` and `bind` set it explicitly; calling `obj.fn()` sets it to `obj`; a plain call `fn()` gives `undefined` in strict mode (or `globalThis` in sloppy scripts). Arrow functions skip all of these and use the `this` of the scope they were defined in.
+
+</QA>
+
+<QA q='What is the difference between call, apply and bind?' level="junior">
+
+All three set `this`. `call(thisArg, a, b)` invokes the function immediately with arguments listed one by one. `apply(thisArg, [a, b])` invokes it immediately with arguments as an array. `bind(thisArg, a)` does **not** invoke; it returns a new function with `this` (and optionally some leading arguments) permanently fixed.
+
+</QA>
+
+<QA q='Why did React class components need this.handleClick = this.handleClick.bind(this)?' level="mid">
+
+Writing `onClick={this.handleClick}` passes a bare function reference. When React later calls it, it calls it as a plain function, so `this` inside is `undefined` (class bodies are strict) and `this.setState` throws. Binding in the constructor creates an instance-bound copy. Class field arrow functions (`handleClick = () => ...`) achieve the same without boilerplate.
+
+</QA>
+
+<QA q='Why do function components not use this at all?' level="mid">
+
+Function components are plain functions that React calls with props; state and other features come from hooks, and handlers are closures over the current render's values. There is no instance to point `this` at, so there's nothing to bind and no risk of losing context when passing handlers down. The trade-off is that you reason about closures (and stale values) instead of `this`.
+
+</QA>
+
+<QA q='Can you change this for an arrow function with call or bind?' level="mid">
+
+No. Arrow functions don't have their own `this`; it's resolved lexically like a normal variable. `call`, `apply` and `bind` still pass the other arguments, but the `this` argument is ignored. Arrow functions also can't be used with `new`.
+
+</QA>
+
+<QA q='Implement a simple version of Function.prototype.bind.' level="senior">
+
+```js
+Function.prototype.myBind = function (thisArg, ...preset) {
+  const fn = this; // the function being bound
+  return function (...args) {
+    return fn.apply(thisArg, [...preset, ...args]);
+  };
+};
+
+function greet(greeting) { return `${greeting}, ${this.name}`; }
+greet.myBind({ name: 'Ada' }, 'Hi')(); // 'Hi, Ada'
+```
+
+This captures the original function and `this` in a closure and uses `apply` to forward arguments. A complete polyfill also handles `new` (where the new object should win over `thisArg`) and preserves the prototype.
+
+</QA>

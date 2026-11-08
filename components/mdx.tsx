@@ -6,6 +6,7 @@ import { Callout } from "./Callout";
 import { CodeBlock } from "./CodeBlock";
 import { CodeTabs, Tab } from "./CodeTabs";
 import { TechBadge } from "./Badges";
+import { QA } from "./QA";
 
 /** Components you can use inside any .mdx feature file. */
 const components = {
@@ -14,6 +15,7 @@ const components = {
   Tab,
   Callout,
   TechBadge,
+  QA,
 };
 
 export function MDXContent({ source }: { source: string }) {

@@ -1,0 +1,288 @@
+---
+title: "Forms: Controlled vs Uncontrolled"
+summary: Build forms where React owns the input values (controlled) or the DOM does (uncontrolled), and pick the right one.
+category: fundamentals
+order: 6
+difficulty: intermediate
+tags: [forms, controlled, uncontrolled, validation, form-actions]
+technologies: [Controlled inputs, FormData, useRef, React 19 form actions, useActionState, useFormStatus, react-hook-form]
+updated: 2026-11-08
+---
+
+## What it is
+
+There are two ways to handle form inputs in React:
+
+- **Controlled**: the input's value lives in **React state**. You pass `value` and update it in `onChange`. React is the single source of truth, so you can validate, format, or disable things on every keystroke.
+- **Uncontrolled**: the **DOM** keeps the value. You set an optional `defaultValue` and read the value when you need it, through a [ref](/fundamentals/use-ref) or with `new FormData(form)` on submit.
+
+| | Controlled | Uncontrolled |
+| --- | --- | --- |
+| Source of truth | React state | DOM |
+| Props | `value` + `onChange` (`checked` for checkboxes) | `defaultValue` / `defaultChecked`, `name` |
+| Re-renders per keystroke | Yes | No |
+| Live validation / formatting | Easy | Harder |
+| Good for | Dynamic UIs, dependent fields | Simple submit-only forms, file inputs, large forms |
+
+**React 19** adds **form actions**: pass a function to `<form action={fn}>` and React calls it with the `FormData` on submit, handles the transition, and resets uncontrolled fields afterwards. `useActionState` tracks the result and pending state, and `useFormStatus` (from `react-dom`) lets a child button know the form is submitting.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ value without onChange: input is read-only (React warns)
+<input value={email} />
+
+// ❌ Switching from uncontrolled to controlled: undefined -> string
+const [user, setUser] = useState<{ name?: string }>({});
+<input value={user.name} onChange={(e) => setUser({ name: e.target.value })} />
+
+// ❌ Reading the checkbox wrong
+<input type="checkbox" value={agreed} onChange={(e) => setAgreed(e.target.value)} />
+
+// ❌ Selected option via the selected attribute, textarea with children
+<select><option selected>Red</option></select>
+<textarea>{bio}</textarea>
+
+// ❌ No preventDefault: full page reload on submit
+<form onSubmit={() => save(values)}>
+```
+
+</Tab>
+<Tab label="Controlled">
+
+```tsx
+function SignupForm({ onSubmit }: { onSubmit: (v: SignupValues) => void }) {
+  const [values, setValues] = useState({ email: "", plan: "free", bio: "", agreed: false });
+  const [error, setError] = useState<string | null>(null);
+
+  const handleChange = (
+    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>,
+  ) => {
+    const { name, value, type } = e.target;
+    const next = type === "checkbox" ? (e.target as HTMLInputElement).checked : value;
+    setValues((v) => ({ ...v, [name]: next }));
+  };
+
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!values.email.includes("@")) return setError("Enter a valid email");
+    if (!values.agreed) return setError("Please accept the terms");
+    setError(null);
+    onSubmit(values);
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input name="email" type="email" value={values.email} onChange={handleChange} />
+      <select name="plan" value={values.plan} onChange={handleChange}>
+        <option value="free">Free</option>
+        <option value="pro">Pro</option>
+      </select>
+      <textarea name="bio" value={values.bio} onChange={handleChange} />
+      <label>
+        <input name="agreed" type="checkbox" checked={values.agreed} onChange={handleChange} /> I agree
+      </label>
+      {error && <p role="alert">{error}</p>}
+      <button disabled={!values.email}>Sign up</button>
+    </form>
+  );
+}
+```
+
+</Tab>
+<Tab label="Uncontrolled">
+
+```tsx
+function ContactForm({ onSubmit }: { onSubmit: (data: ContactData) => void }) {
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const data = new FormData(form);
+    onSubmit({
+      name: String(data.get("name")),
+      email: String(data.get("email")),
+      newsletter: data.get("newsletter") === "on",
+    });
+    form.reset();
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input name="name" defaultValue="" required />
+      <input name="email" type="email" required />
+      <label><input name="newsletter" type="checkbox" defaultChecked /> Newsletter</label>
+      <button>Send</button>
+    </form>
+  );
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why the correct versions work">
+- A controlled input must have **both** `value` and `onChange`, and the value must never be `undefined` (start with `""`), otherwise React sees it switch between uncontrolled and controlled.
+- Checkboxes and radios use `checked`/`e.target.checked`, not `value`. React normalises `<select value>` and `<textarea value>` so they work like text inputs.
+- `FormData` reads every named field in one call, so uncontrolled forms need no state and no re-renders while typing. Native attributes like `required` and `type="email"` give free browser validation.
+</Callout>
+
+## How to use
+
+1. Give every field a `name` and a visible `<label>` (use `htmlFor` with an id, or wrap the input).
+2. **Controlled**: keep values in `useState` (or [useReducer](/fundamentals/use-reducer) for large forms), pass `value`/`checked`, update in `onChange` with a functional update.
+3. **Uncontrolled**: use `defaultValue`/`defaultChecked`, read with `new FormData(e.currentTarget)` on submit, or a ref for one-off reads like focusing or file inputs.
+4. In `onSubmit`, call `e.preventDefault()`, validate, then send. Show errors next to fields with `aria-invalid` and `aria-describedby`.
+5. Disable the submit button while sending and handle the error case.
+6. In React 19 / Next.js, consider `<form action={action}>` with `useActionState` for pending state and server responses.
+7. For big forms with complex validation, use **react-hook-form** (uncontrolled under the hood, minimal re-renders) with a schema library like **Zod**.
+
+## Use-case demos
+
+### Use case 1: React 19 form action with pending state
+
+```tsx
+"use client";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
+
+type State = { error?: string; ok?: boolean };
+
+async function subscribe(_prev: State, formData: FormData): Promise<State> {
+  const email = String(formData.get("email"));
+  if (!email.includes("@")) return { error: "Invalid email" };
+  await api.subscribe(email);
+  return { ok: true };
+}
+
+function SubmitButton() {
+  const { pending } = useFormStatus(); // reads the parent <form>
+  return <button disabled={pending}>{pending ? "Subscribing..." : "Subscribe"}</button>;
+}
+
+export function Newsletter() {
+  const [state, formAction] = useActionState(subscribe, {});
+  return (
+    <form action={formAction}>
+      <input name="email" type="email" />
+      <SubmitButton />
+      {state.error && <p role="alert">{state.error}</p>}
+      {state.ok && <p>Thanks for subscribing!</p>}
+    </form>
+  );
+}
+```
+
+### Use case 2: formatting input as the user types (controlled)
+
+```tsx
+function CardNumberInput() {
+  const [value, setValue] = useState("");
+  const format = (raw: string) =>
+    raw.replace(/\D/g, "").slice(0, 16).replace(/(\d{4})(?=\d)/g, "$1 ");
+  return (
+    <input
+      inputMode="numeric"
+      value={value}
+      onChange={(e) => setValue(format(e.target.value))}
+      placeholder="1234 5678 9012 3456"
+    />
+  );
+}
+```
+
+### Use case 3: react-hook-form + Zod for a large form
+
+```tsx
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
+
+const schema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8, "At least 8 characters"),
+});
+type FormValues = z.infer<typeof schema>;
+
+function LoginForm() {
+  const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<FormValues>({
+    resolver: zodResolver(schema),
+  });
+
+  return (
+    <form onSubmit={handleSubmit(async (values) => await login(values))}>
+      <input {...register("email")} aria-invalid={!!errors.email} />
+      {errors.email && <p>{errors.email.message}</p>}
+      <input type="password" {...register("password")} />
+      {errors.password && <p>{errors.password.message}</p>}
+      <button disabled={isSubmitting}>Log in</button>
+    </form>
+  );
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- "A component is changing an uncontrolled input to be controlled" means `value` went from `undefined` to a string. Initialise with `""`.
+- `<input type="file">` is **always uncontrolled** because its value can only be set by the user. Read it with a ref or `FormData`.
+- Controlled inputs re-render the component on every keystroke. Usually fine, but in a huge form, keep field state local or use react-hook-form.
+- Client validation is for UX only. **Always validate again on the server.**
+- Don't sync props into form state with an effect. Use a `key` to reset the form when the edited entity changes.
+- React 19 automatically resets uncontrolled fields after a successful `action`. If you need values to stay, return them from the action or use controlled inputs.
+</Callout>
+
+## Interview questions
+
+<QA q="What is the difference between controlled and uncontrolled components?" level="junior">
+
+In a **controlled** component, React state holds the input value and the input displays `value={state}`, updating via `onChange`, so React is the source of truth. In an **uncontrolled** component, the DOM holds the value; you provide `defaultValue` and read it when needed with a ref or `FormData`. Controlled gives live validation and dependent fields; uncontrolled is simpler and avoids re-renders for submit-only forms.
+
+</QA>
+
+<QA q="Why does React warn that a component is changing an uncontrolled input to be controlled?" level="junior">
+
+Because the `value` prop started as `undefined` (uncontrolled) and later became a defined value (controlled), or the reverse. React can't switch ownership of the value mid-life. The usual cause is state initialised as `undefined` or an object missing the field; fix it by initialising to `""` (or `false` for `checked`).
+
+</QA>
+
+<QA q="How do you handle multiple inputs with a single change handler?" level="mid">
+
+Give each input a `name` matching a key in your state object and use a computed property in a functional update:
+
+```tsx
+const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const { name, value, type, checked } = e.target;
+  setValues((v) => ({ ...v, [name]: type === "checkbox" ? checked : value }));
+};
+```
+
+For complex forms, a reducer or a library like react-hook-form scales better.
+
+</QA>
+
+<QA q="Why is a file input always uncontrolled?" level="mid">
+
+For security, browsers only let the user choose files; JavaScript can't set the `value` of an `<input type="file">` to a path. So React can't control it. You read the selected files from `e.target.files` in `onChange`, from a ref, or from `FormData` on submit, and you can clear it by resetting the form.
+
+</QA>
+
+<QA q="When would you choose react-hook-form over plain controlled inputs?" level="mid">
+
+When forms are large, have many validation rules, or performance matters. react-hook-form registers inputs as uncontrolled and reads values via refs, so typing doesn't re-render the whole form, and it integrates schema validation (Zod, Yup), field arrays, dirty/touched tracking and submit state. For a 2-3 field form, plain state or `FormData` is simpler and has no dependency.
+
+</QA>
+
+<QA q="What are form actions in React 19?" level="senior">
+
+You can pass a function to `<form action={fn}>`. On submit React calls it with the form's `FormData`, runs it inside a transition, and resets uncontrolled fields when it succeeds. `useActionState(action, initialState)` returns `[state, formAction, isPending]` so you can show results or errors, and `useFormStatus()` from `react-dom` gives child components the parent form's `pending` state. In Next.js the action can be a Server Action, so the form works before JavaScript loads (progressive enhancement).
+
+</QA>
+
+<QA q="How do you make form validation errors accessible?" level="senior">
+
+Associate every input with a visible `<label>`, mark invalid fields with `aria-invalid="true"`, and link the error text with `aria-describedby` pointing to the error element's id (generated with [useId](/fundamentals/use-id)). Announce form-level errors with `role="alert"` and move focus to the first invalid field on submit. Native constraints like `required` and `type="email"` also help assistive tech.
+
+</QA>

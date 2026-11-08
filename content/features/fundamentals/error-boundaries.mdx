@@ -1,0 +1,265 @@
+---
+title: Error Boundaries
+summary: Catch rendering errors in part of the tree and show a fallback UI instead of crashing the whole app.
+category: fundamentals
+order: 19
+difficulty: intermediate
+tags: [errors, error-boundary, resilience, nextjs]
+technologies: [getDerivedStateFromError, componentDidCatch, react-error-boundary, Next.js error.tsx]
+updated: 2026-11-08
+---
+
+## What it is
+
+If a component throws while rendering, React **unmounts the whole tree** by default (a blank screen). An **error boundary** is a component that catches errors thrown by its **children** during rendering, in lifecycle methods/effects, and in constructors, and shows a **fallback UI** instead.
+
+Error boundaries are the one feature that still requires a **class component**. A class becomes a boundary when it implements:
+- `static getDerivedStateFromError(error)`: return state that switches to the fallback (runs during render).
+- `componentDidCatch(error, info)`: side effects like logging to Sentry (`info.componentStack` shows where it happened).
+
+Most apps use the **react-error-boundary** library instead of writing the class, and in Next.js App Router an `error.tsx` file creates a boundary for a route segment automatically.
+
+What boundaries **don't** catch:
+
+| Not caught | Why / what to do instead |
+| --- | --- |
+| Errors in **event handlers** | They don't happen during rendering. Use `try/catch` and set error state. |
+| **Async** code (`setTimeout`, promise callbacks) | Runs outside React's render. Catch it, or rethrow into render (see below). |
+| **Server-side rendering** errors | The class boundary only works on the client; frameworks handle SSR errors. |
+| Errors in the **boundary itself** | Only boundaries **above** it can catch them. |
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ try/catch around JSX doesn't catch child render errors
+function Dashboard() {
+  try {
+    return <RevenueChart />; // RevenueChart renders later, outside this try
+  } catch {
+    return <p>Something went wrong</p>;
+  }
+}
+
+// ❌ One boundary at the root: a broken widget blanks the entire app
+root.render(
+  <ErrorBoundary fallback={<p>Oops</p>}>
+    <App />
+  </ErrorBoundary>,
+);
+
+// ❌ Expecting a boundary to catch handler errors
+<button onClick={() => { throw new Error("boom"); }}>Click</button>
+```
+
+</Tab>
+<Tab label="Class boundary">
+
+```tsx
+import { Component, type ErrorInfo, type ReactNode } from "react";
+
+type Props = { fallback: ReactNode; children: ReactNode };
+type State = { hasError: boolean };
+
+export class ErrorBoundary extends Component<Props, State> {
+  state: State = { hasError: false };
+
+  static getDerivedStateFromError(): State {
+    return { hasError: true }; // render fallback on next render
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    logToService(error, info.componentStack); // Sentry, Datadog...
+  }
+
+  render() {
+    return this.state.hasError ? this.props.fallback : this.props.children;
+  }
+}
+
+// ✅ Granular boundaries: a broken chart doesn't take down the page
+function Dashboard() {
+  return (
+    <>
+      <Header />
+      <ErrorBoundary fallback={<p>Chart failed to load.</p>}>
+        <RevenueChart />
+      </ErrorBoundary>
+      <ErrorBoundary fallback={<p>Orders unavailable.</p>}>
+        <RecentOrders />
+      </ErrorBoundary>
+    </>
+  );
+}
+```
+
+</Tab>
+<Tab label="react-error-boundary">
+
+```tsx
+import { ErrorBoundary, type FallbackProps } from "react-error-boundary";
+
+function ErrorFallback({ error, resetErrorBoundary }: FallbackProps) {
+  return (
+    <div role="alert">
+      <p>Something went wrong:</p>
+      <pre className="text-red-600">{error.message}</pre>
+      <button onClick={resetErrorBoundary}>Try again</button>
+    </div>
+  );
+}
+
+// ✅ Fallback with retry, logging, and auto-reset when the user changes
+function UserPanel({ userId }: { userId: string }) {
+  return (
+    <ErrorBoundary
+      FallbackComponent={ErrorFallback}
+      onError={(error, info) => logToService(error, info.componentStack)}
+      resetKeys={[userId]}
+    >
+      <UserDetails userId={userId} />
+    </ErrorBoundary>
+  );
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why boundaries work this way">
+- Child components render **after** the parent function returns, so a `try/catch` in the parent never sees their errors. Only React, which runs the render, can catch them and re-render the nearest boundary.
+- `getDerivedStateFromError` runs during render to swap in the fallback; `componentDidCatch` runs in the commit phase, which is the safe place for side effects like logging.
+- Placing boundaries around **independent features** contains the damage, just like bulkheads on a ship.
+</Callout>
+
+## How to use
+
+1. Add a top-level boundary as a last resort ("Something went wrong, reload"), plus **granular boundaries** around widgets, routes and third-party components.
+2. Use `react-error-boundary` (or write the class once and reuse it).
+3. Log errors in `componentDidCatch` / `onError` to your monitoring service.
+4. Offer recovery: `resetErrorBoundary` for a retry button, `resetKeys` to reset automatically when inputs change, or a `key` on the boundary.
+5. For event handlers and async code, use `try/catch` and either show error state or hand the error to the nearest boundary with `useErrorBoundary().showBoundary(error)` (react-error-boundary).
+6. In Next.js App Router, add `error.tsx` (a Client Component) next to `page.tsx`, and `global-error.tsx` for errors in the root layout.
+
+## Use-case demos
+
+### Use case 1: Next.js route-level error.tsx
+
+```tsx
+// app/dashboard/error.tsx
+"use client";
+
+import { useEffect } from "react";
+
+export default function DashboardError({
+  error,
+  reset,
+}: {
+  error: Error & { digest?: string };
+  reset: () => void;
+}) {
+  useEffect(() => {
+    logToService(error);
+  }, [error]);
+
+  return (
+    <div className="p-6">
+      <h2>Couldn't load the dashboard.</h2>
+      <button onClick={() => reset()}>Try again</button>
+    </div>
+  );
+}
+```
+
+### Use case 2: send async errors to the boundary
+
+```tsx
+import { useErrorBoundary } from "react-error-boundary";
+
+function ExportButton() {
+  const { showBoundary } = useErrorBoundary();
+
+  const handleExport = async () => {
+    try {
+      await api.exportReport();
+    } catch (error) {
+      showBoundary(error); // nearest ErrorBoundary renders its fallback
+    }
+  };
+
+  return <button onClick={handleExport}>Export</button>;
+}
+```
+
+### Use case 3: isolate a third-party widget
+
+```tsx
+function ProductPage({ product }: { product: Product }) {
+  return (
+    <main>
+      <ProductDetails product={product} />
+      {/* If the reviews SDK crashes, the product page still works */}
+      <ErrorBoundary fallback={null}>
+        <ThirdPartyReviews productId={product.id} />
+      </ErrorBoundary>
+    </main>
+  );
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- Boundaries **don't** catch errors in event handlers, `setTimeout`, unhandled promises, SSR, or in the boundary itself.
+- In development, React still shows the error overlay even when a boundary catches it. Check the production build to see the real fallback.
+- A retry that renders the same broken data will just fail again. Reset the underlying state too (refetch, clear cache) or use `resetKeys`.
+- Don't use boundaries for **expected** errors like validation or 404s. Handle those as normal state/UI (or Next.js `notFound()`).
+- Too few boundaries = whole page blanks; too many = noisy fallbacks everywhere. Wrap meaningful, independent sections.
+- Next.js `error.tsx` doesn't catch errors in the `layout.tsx` of the **same** segment; the parent segment's boundary (or `global-error.tsx`) does.
+</Callout>
+
+## Interview questions
+
+<QA q="What is an error boundary and what problem does it solve?" level="junior">
+
+It's a component that catches JavaScript errors thrown while rendering its children and shows a fallback UI instead. Without one, an uncaught render error unmounts the entire React tree, leaving a blank page. Boundaries let you contain the failure to one part of the UI and log it.
+
+</QA>
+
+<QA q="Why do error boundaries still have to be class components?" level="mid">
+
+They rely on the lifecycle methods `static getDerivedStateFromError` and `componentDidCatch`, and there are no hook equivalents yet. In practice you write one class (or use `react-error-boundary`, which wraps it) and use it from function components everywhere else. The React team has discussed a hook API, but none has shipped.
+
+</QA>
+
+<QA q="Why can't error boundaries catch errors in event handlers?" level="mid">
+
+Boundaries catch errors that happen while React is **rendering** or running lifecycle/effect code, because React can then abandon the broken subtree and render the fallback. Event handlers run later, in response to user actions, and a thrown error there doesn't leave the UI in a half-rendered state. You handle them with `try/catch` and set error state, or forward the error to a boundary (for example `showBoundary` from react-error-boundary, or setting state that makes a component throw during its next render).
+
+</QA>
+
+<QA q="What is the difference between getDerivedStateFromError and componentDidCatch?" level="mid">
+
+`getDerivedStateFromError` is a static method called during the **render phase**; it must be pure and return state that switches to the fallback. `componentDidCatch` is called in the **commit phase** with the error and `info.componentStack`, so it's the place for side effects like reporting to a logging service. You typically implement both.
+
+</QA>
+
+<QA q="How do you let the user recover from an error caught by a boundary?" level="senior">
+
+Reset the boundary's state so it renders the children again, and make sure the cause is fixed (refetch, clear bad state). With react-error-boundary you call `resetErrorBoundary` from the fallback or pass `resetKeys` that reset automatically when they change. A simple custom approach is to change the boundary's `key`, which remounts it with fresh state. In Next.js, `error.tsx` receives a `reset` function.
+
+</QA>
+
+<QA q="Where should you place error boundaries in an app?" level="senior">
+
+Use a top-level boundary as a last-resort fallback, then add boundaries around independent sections: each route, sidebars, dashboard widgets, and anything relying on third-party code. The goal is that one failure degrades a small piece of UI rather than the whole page. Avoid wrapping every tiny component, which adds noise and makes fallbacks inconsistent.
+
+</QA>
+
+<QA q="How does error handling work in the Next.js App Router?" level="mid">
+
+Each route segment can have an `error.tsx` file, which must be a Client Component; Next.js wraps the segment's `page` (and nested children) in a React error boundary that renders it on failure, passing `error` and `reset`. Errors from Server Components are forwarded to the nearest boundary, with the message stripped in production and a `digest` to match server logs. `global-error.tsx` handles errors in the root layout.
+
+</QA>

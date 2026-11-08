@@ -2,7 +2,7 @@
 title: useEffect
 summary: Run side effects after render, with correct dependencies and cleanup, and know when you don't need an effect.
 category: fundamentals
-order: 6
+order: 9
 difficulty: intermediate
 tags: [hooks, useEffect, side-effects, cleanup, fetch]
 technologies: [useEffect, Dependency array, Cleanup function, AbortController]
@@ -150,3 +150,67 @@ function useClickOutside(ref: React.RefObject<HTMLElement>, onOutside: () => voi
 - Don't chain effects that set state that triggers other effects. Compute everything in one place.
 - `async` can't be the effect function itself. Define an async function inside and call it.
 </Callout>
+
+## Interview questions
+
+<QA q="What is the difference between no dependency array, an empty array, and an array with values?" level="junior">
+
+With no array, the effect runs after **every** render. With `[]`, it runs once after the component mounts (and its cleanup runs on unmount). With `[a, b]`, it runs after mount and again after any render where `a` or `b` changed (compared with `Object.is`). The array isn't a choice you make freely: it must list every reactive value the effect reads, and the exhaustive-deps lint rule enforces that.
+
+</QA>
+
+<QA q="What is the cleanup function for, and when does it run?" level="junior">
+
+The function you return from an effect undoes what the effect set up: clear an interval, remove an event listener, close a socket, abort a fetch. React runs it before the effect runs again with new dependencies, and when the component unmounts. Without it you get leaks, duplicate listeners, and updates from stale requests.
+
+</QA>
+
+<QA q="What's wrong with this code?" level="mid">
+
+```tsx
+const [fullName, setFullName] = useState("");
+useEffect(() => {
+  setFullName(first + " " + last);
+}, [first, last]);
+```
+
+`fullName` is derived data, so it doesn't need state or an effect. This version renders once with a stale value, then sets state and renders again. Compute it during render: `const fullName = first + " " + last;`. If the calculation is expensive, wrap it in [useMemo](/fundamentals/use-memo). Effects are for syncing with systems **outside** React, not for transforming data.
+
+</QA>
+
+<QA q="How do you avoid race conditions when fetching data in an effect?" level="mid">
+
+If the user changes the query quickly, an older request can resolve after a newer one and overwrite the correct results. In the cleanup, cancel the stale request with an `AbortController` (call `controller.abort()`), or set an `ignore` flag that the async code checks before calling `setState`. In real apps, React Query, SWR or a framework's data loading handle this (plus caching and deduplication) for you.
+
+</QA>
+
+<QA q="Why does my effect run twice in development?" level="mid">
+
+In Strict Mode, React deliberately mounts, unmounts and remounts every component once in development to check that your effects clean up correctly. If running the effect twice causes a bug (two subscriptions, two analytics events), the cleanup is missing or incomplete. It doesn't happen in production. Don't 'fix' it with a ref that skips the second run; fix the cleanup.
+
+</QA>
+
+<QA q="useEffect vs useLayoutEffect: when do you need the layout version?" level="senior">
+
+`useEffect` runs after the browser has painted, so it doesn't block the screen. `useLayoutEffect` runs synchronously after the DOM is updated but **before** paint. Use it only when you must measure the DOM and change something before the user sees it (for example positioning a tooltip based on its size), to avoid a visible flicker. It blocks painting, so prefer `useEffect` everywhere else.
+
+</QA>
+
+<QA q="When should you NOT use an effect?" level="senior">
+
+The react.dev guide 'You Might Not Need an Effect' lists the common cases: transforming data for rendering (compute it during render), reacting to user events (do it in the event handler, since you know exactly what happened there), resetting state when a prop changes (use a `key`), and notifying a parent about a change (call the callback in the same handler). Chains of effects that set state to trigger other effects are a sign the logic should live in one place. Keep effects for synchronizing with external systems: subscriptions, timers, DOM APIs, non-React widgets, network connections.
+
+</QA>
+
+<QA q="An effect with an interval always logs count as 0. Why?" level="senior">
+
+```tsx
+useEffect(() => {
+  const id = setInterval(() => console.log(count), 1000);
+  return () => clearInterval(id);
+}, []);
+```
+
+The effect captured `count` from the first render, and with `[]` it never re-runs, so the interval callback sees that stale closure forever. Fixes: add `count` to the dependencies (the interval is recreated when it changes), use a functional update like `setCount((c) => c + 1)` if you only need to update it, or read the latest value from a ref. The exhaustive-deps lint rule would have flagged this.
+
+</QA>

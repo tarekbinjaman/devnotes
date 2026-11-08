@@ -1,0 +1,227 @@
+---
+title: Event Handling
+summary: Attach handlers to user interactions, pass arguments safely, and control default behaviour and propagation.
+category: fundamentals
+order: 5
+difficulty: beginner
+tags: [events, synthetic-events, handlers, typescript, basics]
+technologies: [SyntheticEvent, onClick, preventDefault, stopPropagation, Event delegation, TypeScript event types]
+updated: 2026-11-08
+---
+
+## What it is
+
+React attaches event listeners with **camelCase props** like `onClick`, `onChange`, `onSubmit`, `onKeyDown`. You pass a **function**; React calls it with a **synthetic event**, a cross-browser wrapper around the native event with the same API (`target`, `currentTarget`, `preventDefault()`, `stopPropagation()`). The native event is still available as `e.nativeEvent`.
+
+Under the hood React uses **event delegation**: instead of adding a listener to every button, it attaches one listener per event type to the **root container** (since React 17; before that it was `document`) and dispatches to your handlers by walking the React tree.
+
+Some details worth knowing:
+- Since React 17 there is **no event pooling**, so you can read `e.target` inside a `setTimeout` or after an `await`.
+- `onChange` on inputs fires on **every keystroke** (it behaves like the native `input` event).
+- `onScroll` does not bubble in React. Most other events bubble, and every event has a capture version: `onClickCapture`.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ Calling the function during render instead of passing it
+<button onClick={handleDelete()}>Delete</button>
+// runs on every render, and onClick receives its return value
+
+// ❌ Calling with an argument the same way
+{items.map((item) => (
+  <button key={item.id} onClick={removeItem(item.id)}>Remove</button>
+))}
+
+// ❌ Form submit reloads the page
+function Search() {
+  const handleSubmit = () => { search(query); };
+  return <form onSubmit={handleSubmit}>...</form>;
+}
+
+// ❌ Adding native listeners to elements React renders
+useEffect(() => {
+  document.getElementById("save")!.addEventListener("click", save);
+}, []); // never removed, and lost if React replaces the node
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ Pass a reference
+<button onClick={handleDelete}>Delete</button>
+
+// ✅ Wrap in an arrow function to pass arguments
+{items.map((item) => (
+  <button key={item.id} onClick={() => removeItem(item.id)}>Remove</button>
+))}
+
+// ✅ Prevent the browser's default form submission
+function Search() {
+  const [query, setQuery] = useState("");
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    search(query);
+  };
+  return (
+    <form onSubmit={handleSubmit}>
+      <input value={query} onChange={(e) => setQuery(e.target.value)} />
+    </form>
+  );
+}
+
+// ✅ Use React props for React elements; native listeners only for window/document
+useEffect(() => {
+  const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
+  window.addEventListener("keydown", onKey);
+  return () => window.removeEventListener("keydown", onKey);
+}, [close]);
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why the correct version works">
+- `onClick={fn}` hands React a function to call **later**. `onClick={fn()}` calls it **now**, during render, which can also cause an infinite loop if `fn` sets state.
+- The arrow function `() => removeItem(item.id)` creates a closure that remembers the argument and only runs on click.
+- `preventDefault()` stops the browser's built-in action (page reload on submit, navigation on links), so React stays in control.
+- Native listeners on `window`/`document` need cleanup in [useEffect](/fundamentals/use-effect); elements you render should use React's props so delegation and cleanup are handled for you.
+</Callout>
+
+## How to use
+
+1. Define the handler inside the component (it can read props and state): `const handleClick = () => ...`. Name it `handleX`, and name the prop `onX`.
+2. Pass it without calling: `onClick={handleClick}`. Use `onClick={() => fn(arg)}` when you need arguments.
+3. Call `e.preventDefault()` for form submits and custom link behaviour; call `e.stopPropagation()` only when a parent must not receive the event.
+4. Type handlers in TypeScript with React's event types: `React.MouseEvent<HTMLButtonElement>`, `React.ChangeEvent<HTMLInputElement>`, `React.FormEvent<HTMLFormElement>`, `React.KeyboardEvent<HTMLInputElement>`. Or type the whole function: `React.MouseEventHandler<HTMLButtonElement>`.
+5. Use `e.currentTarget` (the element the handler is attached to, correctly typed) rather than `e.target` (the element that was actually clicked, which may be a child).
+6. Let custom components expose event props (`onSelect`, `onClose`) so parents decide what happens.
+
+## Use-case demos
+
+### Use case 1: typed input and keyboard handlers
+
+```tsx
+function TagInput({ onAdd }: { onAdd: (tag: string) => void }) {
+  const [value, setValue] = useState("");
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => setValue(e.target.value);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && value.trim()) {
+      e.preventDefault();
+      onAdd(value.trim());
+      setValue("");
+    }
+  };
+
+  return <input value={value} onChange={handleChange} onKeyDown={handleKeyDown} placeholder="Add tag" />;
+}
+```
+
+### Use case 2: clickable card with a nested button
+
+```tsx
+function ProjectCard({ project, onOpen, onDelete }: ProjectCardProps) {
+  return (
+    <div role="button" tabIndex={0} onClick={() => onOpen(project.id)} className="rounded border p-4">
+      <h3>{project.name}</h3>
+      <button
+        onClick={(e) => {
+          e.stopPropagation(); // don't also open the card
+          onDelete(project.id);
+        }}
+      >
+        Delete
+      </button>
+    </div>
+  );
+}
+```
+
+### Use case 3: one handler for many items using data attributes
+
+```tsx
+function ColorPicker({ onPick }: { onPick: (color: string) => void }) {
+  const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    onPick(e.currentTarget.dataset.color!);
+  };
+  return (
+    <div className="flex gap-2">
+      {["red", "green", "blue"].map((c) => (
+        <button key={c} data-color={c} onClick={handleClick} style={{ background: c }} aria-label={c} />
+      ))}
+    </div>
+  );
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- `onClick={fn()}` is the most common beginner bug. If you see an infinite render loop, check for it first.
+- `stopPropagation()` also hides the event from analytics and "click outside" handlers. Prefer checking `e.target` in the parent when you can.
+- `e.target` vs `e.currentTarget`: `target` is the deepest clicked node, `currentTarget` is where the handler lives.
+- State setters inside handlers are **batched** and the new value isn't visible until the next render. Use functional updates (`setCount((c) => c + 1)`) when updating repeatedly. See [State](/fundamentals/state).
+- Don't put a click handler on a `div` when a `button` would do: buttons get keyboard and screen reader support for free.
+- Passing new arrow functions as props is fine in most cases. Only reach for [useCallback](/fundamentals/use-callback) when the child is memoized.
+</Callout>
+
+## Interview questions
+
+<QA q="What is a synthetic event in React?" level="junior">
+
+A synthetic event is React's cross-browser wrapper around the browser's native event. It exposes the same interface (`target`, `preventDefault()`, `stopPropagation()`, `key`, etc.) so handlers behave consistently across browsers, and the original is available as `e.nativeEvent`. Since React 17, synthetic events are no longer pooled, so you can safely access them asynchronously.
+
+</QA>
+
+<QA q="What is the difference between onClick={handleClick} and onClick={handleClick()}?" level="junior">
+
+The first passes the function so React can call it when the user clicks. The second **calls** the function during render and passes its return value (usually `undefined`) as the handler. If that function sets state, it triggers a re-render, which calls it again, causing an infinite loop. To pass arguments, wrap it: `onClick={() => handleClick(id)}`.
+
+</QA>
+
+<QA q="How does React implement event delegation?" level="mid">
+
+React does not attach listeners to each DOM node. It attaches one listener per event type to the root container (`createRoot` target) and, when an event fires, figures out which React components are on the path and calls their handlers in bubble or capture order. React 17 moved this from `document` to the root, which made it possible to run several React versions on one page and made `e.stopPropagation()` interact more predictably with non-React code.
+
+</QA>
+
+<QA q="What is the difference between e.target and e.currentTarget?" level="mid">
+
+`e.target` is the element where the event originated, for example an `<svg>` icon inside a button. `e.currentTarget` is the element whose handler is currently running, the button itself. In TypeScript, `currentTarget` is typed by the generic you give the event (`React.MouseEvent<HTMLButtonElement>`), while `target` is only typed as `EventTarget`, which is another reason to prefer `currentTarget`.
+
+</QA>
+
+<QA q="When would you use preventDefault vs stopPropagation?" level="junior">
+
+`preventDefault()` cancels the browser's default action: submitting and reloading on a form, following a link, checking a checkbox. `stopPropagation()` stops the event from bubbling to parent handlers, for example a delete button inside a clickable card. They are independent; one does not imply the other.
+
+</QA>
+
+<QA q="How do you type event handlers in TypeScript with React?" level="mid">
+
+Use React's generic event types with the element type: `React.ChangeEvent<HTMLInputElement>` for inputs, `React.FormEvent<HTMLFormElement>` for submit, `React.MouseEvent<HTMLButtonElement>` for clicks, `React.KeyboardEvent<HTMLElement>` for keys. For a prop, type the function itself:
+
+```tsx
+type Props = { onClick: React.MouseEventHandler<HTMLButtonElement> };
+```
+
+Inline handlers are inferred automatically, so explicit types are mostly needed when the handler is defined separately.
+
+</QA>
+
+<QA q="Can you read an event inside setTimeout or after await in modern React?" level="senior">
+
+Yes. React 16 and earlier pooled synthetic events and reset their properties after the handler finished, so you had to call `e.persist()`. React 17 removed pooling, so the event object stays intact. Still, it is cleaner to extract what you need first (`const value = e.target.value`) before async work, especially since `currentTarget` is reset to `null` once dispatch completes, as in the native DOM.
+
+</QA>
+
+<QA q="Why should you avoid adding native event listeners to elements React renders?" level="mid">
+
+React owns those nodes and may replace them, so a listener added with `addEventListener` can be lost or leak, and without cleanup it keeps running (with stale closures) after the component unmounts. Use React's props for anything you render. Native listeners are appropriate for `window`, `document` or third-party DOM, added in a [useEffect](/fundamentals/use-effect) that returns a cleanup removing the same function reference.
+
+</QA>

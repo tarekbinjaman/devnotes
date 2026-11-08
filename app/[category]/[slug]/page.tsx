@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { DifficultyBadge, TechBadge } from "@/components/Badges";
+import { LearnedButton } from "@/components/LearnedButton";
 import { MDXContent } from "@/components/mdx";
 import { Sidebar } from "@/components/Sidebar";
 import { getAllFeatures, getCategory, getFeature } from "@/lib/content";
@@ -45,6 +46,9 @@ export default async function FeaturePage({ params }: Props) {
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="text-3xl font-bold tracking-tight">{feature.title}</h1>
             <DifficultyBadge level={feature.difficulty} />
+            <div className="ml-auto">
+              <LearnedButton id={`${category}/${slug}`} />
+            </div>
           </div>
           <p className="mt-2 text-lg text-zinc-600 dark:text-zinc-400">{feature.summary}</p>
           <div className="mt-4 flex flex-wrap items-center gap-1.5">

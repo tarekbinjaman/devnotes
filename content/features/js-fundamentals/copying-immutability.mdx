@@ -1,0 +1,283 @@
+---
+title: Copying, References & Immutability
+summary: Objects are passed by reference, so learn shallow vs deep copies and immutable update patterns to avoid shared-state bugs and missed React re-renders.
+category: js-fundamentals
+order: 5
+difficulty: beginner
+tags: [references, immutability, spread, structuredClone, deep-copy, state]
+technologies: [spread syntax, Object.assign, structuredClone, Object.freeze, Immer, useState]
+updated: 2026-11-08
+---
+
+## What it is
+
+JavaScript has two kinds of values:
+
+| | Primitives | Objects (references) |
+| --- | --- | --- |
+| Types | `string`, `number`, `boolean`, `null`, `undefined`, `bigint`, `symbol` | objects, arrays, functions, `Map`, `Set`, `Date` |
+| Variable holds | the value itself | a **reference** (pointer) to the object |
+| Assigning `b = a` | copies the value | copies the reference: both point to the **same** object |
+| `===` compares | values | **identity** (same object?), not contents |
+| Mutable? | no, operations create new values | yes, unless frozen |
+
+**Immutability** means never changing an existing object; instead you create a new one with the changes. React relies on this: it detects state changes by comparing references with `Object.is`.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ Mutating state: same reference, React skips the re-render
+const [todos, setTodos] = useState<Todo[]>([]);
+function addTodo(text: string) {
+  todos.push({ id: crypto.randomUUID(), text, done: false });
+  setTodos(todos); // Object.is(old, new) === true → no update
+}
+
+// ❌ Shallow copy, then mutating a nested object: the original changes too
+const [user, setUser] = useState({ name: "Ada", address: { city: "London" } });
+function moveTo(city: string) {
+  const next = { ...user };
+  next.address.city = city; // address is still the SAME object as user.address
+  setUser(next);
+}
+
+// ❌ JSON "deep copy" silently corrupts data
+const copy = JSON.parse(JSON.stringify({ createdAt: new Date(), tags: new Set(["a"]) }));
+// copy.createdAt is a string, copy.tags is {}
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ Create a new array
+function addTodo(text: string) {
+  setTodos((prev) => [...prev, { id: crypto.randomUUID(), text, done: false }]);
+}
+
+// ✅ Copy every level you change
+function moveTo(city: string) {
+  setUser((u) => ({ ...u, address: { ...u.address, city } }));
+}
+
+// ✅ Real deep copy that keeps Dates, Maps, Sets and cycles
+const copy = structuredClone({ createdAt: new Date(), tags: new Set(["a"]) });
+// copy.createdAt instanceof Date → true, copy.tags.has("a") → true
+```
+
+</Tab>
+<Tab label="Array cheatsheet">
+
+```ts
+// Mutating (avoid on state)   →  Non-mutating replacement
+arr.push(x)                    //  [...arr, x]
+arr.unshift(x)                 //  [x, ...arr]
+arr.splice(i, 1)               //  arr.filter((_, idx) => idx !== i)
+arr[i] = x                     //  arr.with(i, x)  or  arr.map((v, idx) => idx === i ? x : v)
+arr.sort(cmp)                  //  arr.toSorted(cmp)   or  [...arr].sort(cmp)
+arr.reverse()                  //  arr.toReversed()
+arr.splice(i, 0, x)            //  arr.toSpliced(i, 0, x)
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why immutability">
+- React (and `memo`, `useMemo`, `useEffect` deps) decides "did this change?" with a cheap **reference check**. Mutation keeps the same reference, so changes are missed.
+- Spread and `Object.assign` copy only **one level**. Nested objects are still shared, so mutating them changes the original and every other holder of that reference.
+- New objects for changed parts plus shared references for unchanged parts (**structural sharing**) is both safe and cheap: unchanged subtrees keep their identity, so memoized children skip rendering.
+</Callout>
+
+## How it works
+
+```text
+const a = { n: 1, tags: ['x'] };
+const b = { ...a };              // shallow copy
+
+  a ──► { n: 1, tags: ─┐ }
+                       ├──► ['x']      ← ONE shared array
+  b ──► { n: 1, tags: ─┘ }
+
+b.n = 2          → only b changes (n is a primitive copied into b)
+b.tags.push('y') → a.tags is ['x', 'y'] too (same array)
+```
+
+| Method | Depth | Keeps Date/Map/Set | Functions | Cycles |
+| --- | --- | --- | --- | --- |
+| `{ ...obj }`, `[...arr]`, `Object.assign` | shallow | references kept | copied (as references) | n/a |
+| `JSON.parse(JSON.stringify(x))` | deep | no: Date → string, Map/Set → `{}` | dropped | throws |
+| `structuredClone(x)` | deep | yes | throws `DataCloneError` | supported |
+
+Function arguments follow the same rule: JavaScript passes **references by value**. A function can mutate an object you pass in, but reassigning the parameter doesn't affect the caller.
+
+## Use-case demos
+
+### Use case 1: update one item in a nested list
+
+```tsx
+type Board = { columns: { id: string; cards: { id: string; title: string }[] }[] };
+
+function renameCard(board: Board, columnId: string, cardId: string, title: string): Board {
+  return {
+    ...board,
+    columns: board.columns.map((col) =>
+      col.id !== columnId
+        ? col // unchanged column keeps its reference
+        : { ...col, cards: col.cards.map((c) => (c.id === cardId ? { ...c, title } : c)) },
+    ),
+  };
+}
+
+setBoard((b) => renameCard(b, "todo", "c42", "Write tests"));
+```
+
+### Use case 2: Immer for deeply nested updates
+
+```tsx
+import { produce } from "immer";
+
+setBoard((b) =>
+  produce(b, (draft) => {
+    const card = draft.columns.find((c) => c.id === "todo")?.cards.find((c) => c.id === "c42");
+    if (card) card.title = "Write tests"; // looks like mutation, produces a new immutable object
+  }),
+);
+```
+
+Immer (built into Redux Toolkit) records changes on a draft and returns a new object with structural sharing.
+
+### Use case 3: snapshot a form for "reset" or "unsaved changes"
+
+```tsx
+function useDirtyForm<T>(initial: T) {
+  const original = useRef(structuredClone(initial)); // deep snapshot, safe from later edits
+  const [values, setValues] = useState(initial);
+  const isDirty = JSON.stringify(values) !== JSON.stringify(original.current); // fine for plain data
+  const reset = () => setValues(structuredClone(original.current));
+  return { values, setValues, isDirty, reset };
+}
+```
+
+More state update patterns: [useState](/fundamentals/state).
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- `Object.freeze` is **shallow**: nested objects are still mutable. In strict mode (modules, classes) writes to a frozen object throw a `TypeError`; in sloppy scripts they fail silently.
+- Don't deep-clone state on every update. It breaks structural sharing, so every memoized child re-renders, and it's slow for big trees. Copy only the path you change.
+- `structuredClone` can't clone functions, DOM nodes or class methods: class instances come back as plain objects (the prototype is lost).
+- Sorting or reversing a prop or state array in place (`items.sort()`) mutates the parent's data. Use `toSorted()` or copy first.
+- Comparing objects with `===` checks identity only. Use a field (`a.id === b.id`) or a deep-equal helper to compare contents.
+</Callout>
+
+## Interview questions
+
+<QA q="What does this code print and why?" level="junior">
+
+```js
+const a = { n: 1, tags: ['x'] };
+const b = { ...a };
+b.n = 2;
+b.tags.push('y');
+console.log(a.n, a.tags);
+console.log(a === b, a.tags === b.tags);
+```
+
+Output:
+
+```text
+1 [ 'x', 'y' ]
+false true
+```
+
+Spread creates a new outer object, so `a === b` is `false` and changing `b.n` doesn't touch `a`. But it is a **shallow** copy: `tags` holds the same array reference in both objects, so the push is visible through `a` and `a.tags === b.tags` is `true`.
+
+</QA>
+
+<QA q="What does this JSON copy produce?" level="mid">
+
+```js
+const src = { d: new Date(0), u: undefined, f() {}, n: NaN, m: new Map([[1, 2]]) };
+const c = JSON.parse(JSON.stringify(src));
+console.log(c);
+```
+
+Output (Node):
+
+```text
+{ d: '1970-01-01T00:00:00.000Z', n: null, m: {} }
+```
+
+The `Date` becomes an ISO **string**, `undefined` values and functions are **dropped**, `NaN` becomes `null`, and the `Map` becomes an empty object because it has no enumerable own properties. Circular references would throw. Use `structuredClone` for real deep copies.
+
+</QA>
+
+<QA q="What does this print? Mutating a parameter vs reassigning it." level="mid">
+
+```js
+function rename(u) {
+  u.name = 'Bob';
+  u = { name: 'Eve' };
+}
+const usr = { name: 'Ada' };
+rename(usr);
+console.log(usr.name);
+```
+
+It prints `Bob`. The parameter `u` receives a copy of the **reference**, so `u.name = 'Bob'` mutates the caller's object. Reassigning `u` only points the local variable at a new object; the caller's `usr` is unaffected. This is often described as "pass by sharing".
+
+</QA>
+
+<QA q="What does this print? (Object.freeze)" level="mid">
+
+```js
+'use strict';
+const cfg = Object.freeze({ a: 1, nested: { b: 1 } });
+try { cfg.a = 2; } catch (e) { console.log(e.constructor.name); }
+cfg.nested.b = 2;
+console.log(cfg.a, cfg.nested.b);
+```
+
+Output:
+
+```text
+TypeError
+1 2
+```
+
+In strict mode, writing to a frozen property throws a `TypeError`, so `cfg.a` stays `1`. `freeze` is shallow: `nested` is a separate, unfrozen object, so `cfg.nested.b = 2` succeeds. Freeze recursively if you need a deep freeze.
+
+</QA>
+
+<QA q='Why does [1, 2] === [1, 2] return false?' level="junior">
+
+Each array literal creates a new object in memory, and `===` on objects compares **identity**, not contents. Two different objects are never equal, even with identical contents. Primitives like `'a' === 'a'` compare by value and are `true`.
+
+</QA>
+
+<QA q='Why must you not mutate state directly in React?' level="junior">
+
+React compares the old and new state with `Object.is`. If you mutate the existing object and pass it back to the setter, the reference is unchanged, so React may skip the re-render. Even when something else causes a render, memoized children, `useMemo` and effects compare references too and will miss the change. Always create a new object or array for anything that changed.
+
+</QA>
+
+<QA q='What is the difference between a shallow and a deep copy?' level="junior">
+
+A shallow copy creates a new top-level object but copies nested values by reference, so nested objects are shared with the original (spread, `Object.assign`, `Array.from`, `slice`). A deep copy recursively copies every level, so nothing is shared (`structuredClone`, or libraries like lodash `cloneDeep`). Shallow copies are usually what you want for React updates, combined with copying each level along the changed path.
+
+</QA>
+
+<QA q='When would you reach for structuredClone, and what are its limits?' level="mid">
+
+Use it when you need an independent deep copy of plain data: snapshots for undo or reset, copying data before handing it to code that mutates, or cloning objects with `Date`, `Map`, `Set`, typed arrays or circular references. It throws a `DataCloneError` on functions and DOM nodes, turns getters into plain data properties, and does not preserve class prototypes, so class instances come back as plain objects. It's also slower than a targeted shallow copy, so don't use it for every state update.
+
+</QA>
+
+<QA q='What is structural sharing and why does it matter for performance?' level="senior">
+
+Structural sharing means an immutable update creates new objects only along the path that changed and reuses references for everything else. Updating one card in a board creates a new board, a new columns array, a new column and a new card, while every other column and card keeps its identity. That's cheap (no full deep copy) and lets `React.memo`, selectors and `useMemo` skip work for unchanged parts by comparing references. Immer and Redux Toolkit implement this automatically.
+
+</QA>

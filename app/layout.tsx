@@ -21,6 +21,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 DevNotes
               </Link>
               <nav className="flex items-center gap-3 text-sm">
+                <Link href="/roadmap" className="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100">
+                  Roadmap
+                </Link>
                 <Link href="/" className="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100">
                   All features
                 </Link>

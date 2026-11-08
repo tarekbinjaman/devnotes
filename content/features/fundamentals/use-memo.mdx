@@ -2,7 +2,7 @@
 title: useMemo
 summary: Cache the result of an expensive calculation between renders, recomputing only when inputs change.
 category: fundamentals
-order: 8
+order: 12
 difficulty: intermediate
 tags: [hooks, useMemo, performance, memoization]
 technologies: [useMemo, Dependency array, Referential equality, React Compiler]
@@ -110,3 +110,52 @@ const product = productsById.get(selectedId); // O(1) instead of .find() every r
 - Dependencies that are new every render (inline objects) make `useMemo` useless.
 - For caching **functions**, use [useCallback](/fundamentals/use-callback).
 </Callout>
+
+## Interview questions
+
+<QA q="What is the difference between useMemo and useCallback?" level="junior">
+
+`useMemo` caches the **result** of calling a function; `useCallback` caches the **function itself**. In fact `useCallback(fn, deps)` is equivalent to `useMemo(() => fn, deps)`. Use `useMemo` for expensive values or stable objects/arrays, and [useCallback](/fundamentals/use-callback) for stable event handlers passed to memoized children or used in effect dependencies.
+
+</QA>
+
+<QA q="When is useMemo worth using, and when is it a waste?" level="junior">
+
+It's worth it when the calculation is measurably slow (react.dev suggests that around 1 ms or more is a signal, measured with `console.time` on a realistic device), or when you need a stable reference for a `memo` child, a context value, or another hook's dependency. It's a waste for cheap expressions like `a + b` or `items.length`, because it adds the cost of storing the value and comparing dependencies on every render, plus extra code to read.
+
+</QA>
+
+<QA q="Can you rely on useMemo to run your function only once?" level="mid">
+
+No. React treats it as a performance optimization, not a semantic guarantee: it may throw away the cache (for example in development on file edits, or in the future for offscreen components) and recompute. In Strict Mode the calculation also runs twice in development. Your code must work correctly without memoization; if you need a value created exactly once, use a ref with lazy initialization or state with an initializer function.
+
+</QA>
+
+<QA q="What's wrong with this code?" level="mid">
+
+```tsx
+const options = { sortBy, direction };
+const sorted = useMemo(() => sortRows(rows, options), [rows, options]);
+```
+
+`options` is a new object on every render, so the dependency always changes and `useMemo` recalculates every time, which makes it useless. Depend on the primitive values instead: `useMemo(() => sortRows(rows, { sortBy, direction }), [rows, sortBy, direction])`, or memoize `options` itself.
+
+</QA>
+
+<QA q="The list lags when typing in a search box. How would you approach it?" level="mid">
+
+First profile with React DevTools to confirm the filtering or the list rendering is the slow part. If the filter calculation is heavy, wrap it in `useMemo` keyed on the list and query so other state changes don't redo it. If it's still slow because it reruns on every keystroke, use `useDeferredValue(query)` so typing stays responsive while the list catches up. If rendering thousands of rows is the bottleneck, `memo` the rows and [virtualize](/css/virtualized-list) the list. See [List Filtering](/react/list-filtering).
+
+</QA>
+
+<QA q="Why does a context value often need useMemo?" level="senior">
+
+Every consumer of a context re-renders when the `value` changes by reference. If a provider passes `value={{ user, login }}`, it creates a new object on every provider render, so all consumers re-render even when `user` didn't change. Wrapping the value in `useMemo` (and the functions in `useCallback`) means consumers only re-render when the actual data changes.
+
+</QA>
+
+<QA q="How does the React Compiler change how you use useMemo?" level="senior">
+
+The React Compiler (stable since late 2025) analyzes components at build time and inserts memoization automatically, at a finer granularity than you'd write by hand. In a codebase that uses it, most manual `useMemo`/`useCallback` calls become unnecessary, and the guidance is to write plain code and keep manual memoization as an escape hatch where you need precise control, such as a value used as an effect dependency. It only works on code that follows the Rules of React, so purity still matters.
+
+</QA>

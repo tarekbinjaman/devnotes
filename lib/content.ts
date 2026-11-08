@@ -13,6 +13,7 @@ export type Category = {
 
 /** Add a new category here + a folder in content/features/<slug>. */
 export const CATEGORIES: Category[] = [
+  { slug: "js-fundamentals", name: "JavaScript Fundamentals", description: "The JS concepts every React interview tests: closures, the event loop, promises, this, copying.", icon: "🧠" },
   { slug: "fundamentals", name: "React Fundamentals", description: "Core React concepts in learning order: components, state, rendering and hooks.", icon: "📘" },
   { slug: "react", name: "React / Next.js", description: "Real-world React & Next.js patterns: filtering, search, lazy loading.", icon: "⚛️" },
   { slug: "javascript", name: "JavaScript / TypeScript", description: "Language-level utilities and performance techniques.", icon: "🟨" },

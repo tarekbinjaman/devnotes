@@ -1,0 +1,214 @@
+---
+title: useLayoutEffect
+summary: Run code after React updates the DOM but before the browser paints, to measure layout without flicker.
+category: fundamentals
+order: 10
+difficulty: intermediate
+tags: [hooks, useLayoutEffect, dom, layout, performance]
+technologies: [useLayoutEffect, getBoundingClientRect, ResizeObserver, SSR]
+updated: 2026-11-08
+---
+
+## What it is
+
+`useLayoutEffect` has the same signature as [useEffect](/fundamentals/use-effect), but runs at a different moment:
+
+1. React renders and **commits** changes to the DOM.
+2. **`useLayoutEffect`** runs **synchronously**. The browser has not painted yet.
+3. The browser **paints** the screen.
+4. **`useEffect`** runs (usually after paint).
+
+If a layout effect sets state, React re-renders **synchronously before paint**, so the user only ever sees the final result. That makes it the right tool when you must **read layout** (size, position, scroll) and immediately **adjust** what's on screen: tooltips, popovers, auto-sizing textareas, scroll restoration.
+
+| | `useEffect` | `useLayoutEffect` |
+| --- | --- | --- |
+| Runs | After paint (non-blocking) | Before paint (blocks paint) |
+| Good for | Data fetching, subscriptions, logging | Measuring DOM, positioning, preventing flicker |
+| Runs on the server | No | No (and it used to warn) |
+| Default choice | ✅ | Only when you see flicker |
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ useEffect for positioning: tooltip renders at (0,0), paints, then jumps
+function Tooltip({ anchorRect, children }: TooltipProps) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [height, setHeight] = useState(0);
+
+  useEffect(() => {
+    setHeight(ref.current!.getBoundingClientRect().height);
+  }, []);
+
+  const top = anchorRect.top - height - 8; // first paint uses height = 0
+  return <div ref={ref} style={{ position: "fixed", top, left: anchorRect.left }}>{children}</div>;
+}
+
+// ❌ useLayoutEffect for data fetching: blocks paint for no reason
+useLayoutEffect(() => {
+  fetch("/api/user").then((r) => r.json()).then(setUser);
+}, []);
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ Measure before paint, then position. No visible jump.
+function Tooltip({ anchorRect, children }: TooltipProps) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [height, setHeight] = useState(0);
+
+  useLayoutEffect(() => {
+    setHeight(ref.current!.getBoundingClientRect().height);
+  }, []);
+
+  // If there's no room above, flip below the anchor
+  const fitsAbove = anchorRect.top - height - 8 > 0;
+  const top = fitsAbove ? anchorRect.top - height - 8 : anchorRect.bottom + 8;
+
+  return <div ref={ref} style={{ position: "fixed", top, left: anchorRect.left }}>{children}</div>;
+}
+
+// ✅ Side effects that don't touch layout stay in useEffect
+useEffect(() => {
+  fetch("/api/user").then((r) => r.json()).then(setUser);
+}, []);
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why useLayoutEffect removes the flicker">
+- The browser can't paint while JavaScript is running. Because the layout effect runs synchronously after the DOM update, the measurement and the re-render with the correct position both happen **before the first paint**.
+- With `useEffect`, the browser may paint the wrong position first, then the effect corrects it on the next frame, which is the visible "jump".
+- Keeping non-layout work in `useEffect` means it doesn't delay what the user sees.
+</Callout>
+
+## How to use
+
+1. Start with `useEffect`. Switch to `useLayoutEffect` only if you **see flicker** caused by measuring or mutating layout.
+2. Attach a [ref](/fundamentals/use-ref) to the element, read `getBoundingClientRect()`, `scrollHeight`, `offsetWidth` etc. inside the layout effect.
+3. Set state or mutate the DOM directly with the result. Keep the work small, since it blocks painting.
+4. Return a cleanup function if you subscribe to anything (resize, scroll).
+5. For values that change after mount (window resize, content changes), combine it with a `ResizeObserver` or window listeners.
+6. In SSR apps, render layout-dependent pieces only on the client, or accept that the first server HTML is unmeasured.
+
+## Use-case demos
+
+### Use case 1: auto-growing textarea
+
+```tsx
+function AutoTextarea(props: React.ComponentProps<"textarea">) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [props.value]);
+
+  return <textarea ref={ref} rows={1} className="resize-none overflow-hidden" {...props} />;
+}
+```
+
+### Use case 2: keep chat scrolled to bottom without a jump
+
+```tsx
+function Messages({ messages }: { messages: Message[] }) {
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight; // before paint: no flash of old position
+  }, [messages.length]);
+
+  return (
+    <div ref={listRef} className="h-80 overflow-y-auto">
+      {messages.map((m) => <p key={m.id}>{m.text}</p>)}
+    </div>
+  );
+}
+```
+
+### Use case 3: measure an element and respond to resize
+
+```tsx
+function useElementSize<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => setSize({ width: el.offsetWidth, height: el.offsetHeight });
+    update(); // initial measure before paint
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  return [ref, size] as const;
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- It **blocks painting**. Heavy work here makes the app feel slow. Most effects belong in `useEffect`.
+- **SSR**: layout effects don't run on the server, so server HTML can't contain measured values. React before 19 logged a warning ("useLayoutEffect does nothing on the server"); React 19 removed it, but the limitation remains. Common fixes: render the component only on the client, or use a `useIsomorphicLayoutEffect` helper that falls back to `useEffect` on the server.
+- Setting state in a layout effect triggers a **synchronous** re-render. Avoid chains of layout effects that set state repeatedly.
+- For positioning popovers in production, a library like **Floating UI** handles flipping, collision and scrolling for you.
+- Like all effects, it runs twice on mount in development Strict Mode, so make sure cleanup is correct.
+</Callout>
+
+## Interview questions
+
+<QA q="What is the difference between useEffect and useLayoutEffect?" level="junior">
+
+Both run after React commits DOM changes, but `useLayoutEffect` runs **synchronously before the browser paints**, while `useEffect` usually runs **after paint**. State updates inside a layout effect are processed before the user sees anything. Use `useEffect` by default and `useLayoutEffect` only when you need to measure or adjust layout without a visible flicker.
+
+</QA>
+
+<QA q="When would you actually need useLayoutEffect?" level="mid">
+
+When the render output depends on a DOM measurement: positioning a tooltip or dropdown relative to its trigger, flipping it if it would overflow, auto-sizing a textarea, restoring scroll position, or animating from a measured starting point (FLIP). In all these cases using `useEffect` would paint an incorrect frame first and then jump.
+
+</QA>
+
+<QA q="Why can useLayoutEffect hurt performance?" level="mid">
+
+It runs synchronously in the commit phase and the browser cannot paint until it finishes, including any synchronous re-render caused by setting state inside it. Expensive calculations or forced layouts (reading layout after writing styles, repeatedly) delay the frame and make interactions feel janky. That's why React recommends `useEffect` unless you specifically need the before-paint timing.
+
+</QA>
+
+<QA q="What happens to useLayoutEffect during server-side rendering?" level="senior">
+
+It doesn't run on the server, because there is no DOM to measure, and the same is true for `useEffect`. Older React versions warned because the server HTML wouldn't match what the layout effect would produce on the client. The typical solutions are to render that component only on the client (for example lazy-loaded with SSR disabled or after a mounted flag), or to use a helper:
+
+```tsx
+const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
+```
+
+</QA>
+
+<QA q="In what order do layout effects and regular effects run?" level="mid">
+
+During commit, React applies DOM mutations and attaches refs, then runs all layout effect cleanups and setups (children before parents), then the browser paints, then React runs passive effects (`useEffect`), also children before parents. When a discrete user event like a click causes the update, React may flush the passive effects synchronously before paint as well, but layout effects are always guaranteed to run before paint.
+
+</QA>
+
+<QA q="Is reading ref.current in useEffect enough to measure an element?" level="junior">
+
+You can read it, because the DOM exists when the effect runs. The problem is timing: if you use the measurement to change what's rendered, the browser may already have painted the unmeasured version, so the user sees a jump. For pure measurements that don't affect the UI (analytics, logging sizes), `useEffect` is fine.
+
+</QA>
+
+<QA q="How does useLayoutEffect relate to componentDidMount in class components?" level="senior">
+
+`componentDidMount` and `componentDidUpdate` run synchronously after the DOM update and before paint, which matches `useLayoutEffect` timing, not `useEffect`. That's why some code migrated from classes to `useEffect` started flickering. However, the React team recommends `useEffect` for most migrated logic and `useLayoutEffect` only where that synchronous timing is actually needed.
+
+</QA>

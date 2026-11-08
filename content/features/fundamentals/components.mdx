@@ -161,3 +161,57 @@ function SearchPage() {
 - Never define a component inside another component's body.
 - Don't mutate props or variables outside the component while rendering. Rendering must be pure.
 </Callout>
+
+## Interview questions
+
+<QA q="What is a React component, and how is it different from a regular function?" level="junior">
+
+A component is a JavaScript function that returns JSX (a description of UI). The differences are in how it is used: React calls it for you (you write `<Profile />`, not `Profile()`), its name must start with a capital letter so JSX treats it as a component instead of an HTML tag, and it can use hooks to keep state between calls. React expects it to be **pure**: same props and state in, same JSX out, with no side effects during render.
+
+</QA>
+
+<QA q="What does 'rendering must be pure' mean, and why does React care?" level="junior">
+
+During render a component should only compute JSX from its props, state and context. It must not mutate external variables, change props, make network calls or touch the DOM. React relies on purity so it can render a component more than once, pause or throw away a render (concurrent features), and skip renders when inputs did not change. Strict Mode double-calls components in development precisely to surface impure code. Side effects belong in event handlers or, if they sync with something external, in [useEffect](/fundamentals/use-effect).
+
+</QA>
+
+<QA q="What's wrong with this code?" level="mid">
+
+```tsx
+function Page() {
+  const [query, setQuery] = useState("");
+  function SearchInput() {
+    return <input value={query} onChange={(e) => setQuery(e.target.value)} />;
+  }
+  return <SearchInput />;
+}
+```
+
+`SearchInput` is defined inside `Page`, so every render of `Page` creates a **new component type**. React sees a different type at that position, unmounts the old input and mounts a new one, so the input loses focus after every keystroke and any state inside it is reset. Move `SearchInput` to the top level and pass `query` and `setQuery` as props.
+
+</QA>
+
+<QA q="How do two sibling components share data?" level="junior">
+
+Lift the state up to their closest common parent and pass the value down as props, along with a callback to change it. Data flows down through props and changes flow up through callbacks. If the common parent is far away and many levels would just forward props, consider composition (passing `children`) first, and then [Context](/fundamentals/context-api) or a state library.
+
+</QA>
+
+<QA q="What is composition, and why does React prefer it over inheritance?" level="mid">
+
+Composition means building components by nesting them and passing JSX in as props, most often through `children` (for example a `Card` or `Modal` that wraps whatever you give it). React has no component inheritance in practice: the docs have long recommended composition because it keeps components decoupled and makes the data flow explicit. Composition also solves a lot of prop drilling, because the parent that owns the data can render the deep child directly and pass it through `children`.
+
+</QA>
+
+<QA q="When should you split a component into smaller ones, and when is that overkill?" level="mid">
+
+Split when a piece has its own responsibility (single-responsibility principle), is reused, has state that only part of the tree needs, or makes the parent hard to read. Moving fast-changing state down into a small child also limits how much re-renders. Don't split a tiny piece used once just for the sake of it: that adds indirection and prop passing without making anything clearer.
+
+</QA>
+
+<QA q="Function components vs class components: which do you use today and why?" level="senior">
+
+Function components with hooks are the standard: they are shorter, make logic reusable through custom hooks instead of HOCs and render props, and newer features (Server Components, the React Compiler, hooks like `use`) are built around them. Class components still work and you will meet them in legacy code. The one thing that still needs a class is an **error boundary** (`componentDidCatch` / `getDerivedStateFromError`), which teams usually wrap in a library like `react-error-boundary`.
+
+</QA>

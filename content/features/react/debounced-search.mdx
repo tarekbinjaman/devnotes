@@ -154,3 +154,71 @@ function onKeyDown(e: React.KeyboardEvent) {
 - Set a minimum query length (2–3 chars) so you don't search the whole database for "a".
 - In React Strict Mode (dev), effects run twice. The AbortController makes that harmless.
 </Callout>
+
+## Interview questions
+
+<QA q="Why debounce a search input that calls an API?" level="junior">
+
+Without it, every keystroke fires a request: typing 'react hooks' sends 11 requests, most of which are useless. That wastes server and network resources, can hit rate limits, and causes results to flicker. Debouncing waits until the user pauses (often 250 to 400 ms) and then sends one request for the final text.
+
+</QA>
+
+<QA q="What is a race condition in search-as-you-type, and how do you prevent it?" level="mid">
+
+Responses can arrive out of order: the request for 're' might finish after the one for 'react', so the UI shows results for an older query. Debouncing reduces this but doesn't eliminate it. Fix it by aborting the previous request with an `AbortController` in the effect cleanup, or by ignoring responses that don't match the latest query. Libraries like SWR and TanStack Query key results by query, so stale responses never overwrite current ones.
+
+</QA>
+
+<QA q="Implement the core of a debounced search in React." level="mid">
+
+Debounce the **value**, then fetch when the debounced value changes:
+
+```tsx
+const debounced = useDebouncedValue(query, 300);
+
+useEffect(() => {
+  if (debounced.length < 2) return;
+  const controller = new AbortController();
+  fetch(`/api/search?q=${encodeURIComponent(debounced)}`, { signal: controller.signal })
+    .then((r) => r.json())
+    .then(setResults)
+    .catch((e) => { if (e.name !== "AbortError") setError(e); });
+  return () => controller.abort();
+}, [debounced]);
+```
+
+Key points to mention: encode the query, abort in cleanup, ignore `AbortError`, and enforce a minimum length.
+
+</QA>
+
+<QA q="What's wrong with this code?" level="mid">
+
+```tsx
+function Search() {
+  const [q, setQ] = useState("");
+  const search = debounce((v: string) => fetchResults(v), 300);
+  return <input value={q} onChange={(e) => { setQ(e.target.value); search(e.target.value); }} />;
+}
+```
+
+`debounce` creates a new function with its own timer on every render, and each keystroke causes a render, so every keystroke gets a fresh debounced function and nothing is actually debounced: all calls fire after 300 ms. Create it once with `useMemo`/`useRef` (and cancel it on unmount), or debounce the value with a `useDebouncedValue` hook as above.
+
+</QA>
+
+<QA q="Debounce vs useDeferredValue: which should you use for search?" level="senior">
+
+They solve different problems. Debounce delays **work** (network requests) by a fixed time and reduces how many requests happen. `useDeferredValue` doesn't delay anything by time: it lets React render the urgent update (the input) first and render the expensive part with the deferred value in the background, interruptibly. Use debounce for API calls, and `useDeferredValue` for filtering data that's already in memory. See [List Filtering](/react/list-filtering).
+
+</QA>
+
+<QA q="How would you make the search UX feel fast and robust?" level="senior">
+
+Show a subtle loading indicator but keep the previous results visible while fetching, rather than flashing an empty list. Cache results per query (SWR/TanStack Query or a small `Map`) so backspacing is instant. Handle empty states and errors separately. Keep the query in the URL so results are shareable and survive refresh. Support keyboard navigation and ARIA (`role='combobox'`, `aria-activedescendant`) for autocomplete. On the server, use an index suited to search (full-text or trigram) and a result limit.
+
+</QA>
+
+<QA q="How do you test a debounced search component?" level="senior">
+
+Use fake timers (`vi.useFakeTimers()` or `jest.useFakeTimers()`), type into the input, and assert that no request happened before the delay and exactly one happened after advancing timers. Mock the API with MSW to control response timing, which lets you test the race condition too: delay the first response and verify the UI shows the result of the latest query.
+
+</QA>

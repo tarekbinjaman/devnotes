@@ -1,0 +1,250 @@
+---
+title: JSX, Conditional Rendering & Lists
+summary: Write JSX correctly, show or hide UI with conditions, and render lists with stable keys.
+category: fundamentals
+order: 2
+difficulty: beginner
+tags: [jsx, conditional-rendering, lists, keys, fragments, basics]
+technologies: [JSX, Ternary, Logical AND, Array.map, Keys, Fragments]
+updated: 2026-11-08
+---
+
+## What it is
+
+**JSX** is a syntax extension that lets you write markup inside JavaScript. The compiler turns every tag into a function call (`jsx("div", props)` with the modern transform, `React.createElement` in the old one), so JSX is just **expressions that produce React elements**.
+
+Key rules:
+1. A component returns **one root** element. Use a fragment (`<>...</>`) to group siblings without an extra DOM node.
+2. **Close every tag**, including `<img />` and `<input />`.
+3. Attributes are **camelCase**: `className`, `htmlFor`, `onClick`, `tabIndex`. `style` takes an object: `style={{ marginTop: 8 }}`.
+4. Curly braces embed any **JavaScript expression** (`{user.name}`, `{items.length > 0 ? ... : ...}`), but not statements like `if` or `for`.
+
+Conditional rendering is plain JavaScript: `if` + early return, the ternary `a ? b : c`, or `cond && <X />`. Lists are arrays of elements, usually produced with `.map()`, and each item needs a stable **`key`**.
+
+| Pattern | Use when |
+| --- | --- |
+| Early `return` | Whole component depends on a condition (loading, error, no access) |
+| Ternary | Choose between two outputs |
+| `&&` | Show something or nothing (with a real boolean on the left) |
+| Lookup object | Many variants (status, step, tab) |
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ 0 && renders "0" on screen when the list is empty
+function Inbox({ messages }: { messages: Message[] }) {
+  return <div>{messages.length && <Badge count={messages.length} />}</div>;
+}
+
+// ❌ Index as key on a list that can reorder / insert / delete
+function TodoList({ todos }: { todos: Todo[] }) {
+  return (
+    <ul>
+      {todos.map((todo, i) => (
+        <li key={i}>
+          <input defaultValue={todo.text} /> {/* state sticks to the wrong row */}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// ❌ Nested ternaries nobody can read
+return isLoading ? <Spinner /> : error ? <Error /> : data.length ? <List /> : <Empty />;
+
+// ❌ Extra wrapper div just to return siblings (breaks tables / flex layouts)
+function Row() {
+  return (
+    <div>
+      <td>Name</td>
+      <td>Email</td>
+    </div>
+  );
+}
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ Boolean on the left of &&
+function Inbox({ messages }: { messages: Message[] }) {
+  return <div>{messages.length > 0 && <Badge count={messages.length} />}</div>;
+}
+
+// ✅ Stable id from the data as key
+function TodoList({ todos }: { todos: Todo[] }) {
+  return (
+    <ul>
+      {todos.map((todo) => (
+        <li key={todo.id}>
+          <input defaultValue={todo.text} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// ✅ Early returns read top to bottom
+function Results({ isLoading, error, data }: ResultsProps) {
+  if (isLoading) return <Spinner />;
+  if (error) return <ErrorMessage error={error} />;
+  if (data.length === 0) return <Empty />;
+  return <List items={data} />;
+}
+
+// ✅ Fragment: no extra DOM node
+function Row() {
+  return (
+    <>
+      <td>Name</td>
+      <td>Email</td>
+    </>
+  );
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why the correct version works">
+- `&&` returns the **left value** when it is falsy. `false`, `null` and `undefined` render nothing, but `0` and `NaN` are rendered as text. Forcing a boolean (`> 0`, `!!x`, `Boolean(x)`) avoids the stray `0`.
+- React matches list items between renders **by key**. A stable id keeps each row's state and DOM attached to the right item. An index key shifts when you insert or delete, so state "jumps" to a neighbour.
+- Early returns keep each branch flat and readable, and fragments let you return siblings without breaking HTML structure (tables, flex/grid children).
+</Callout>
+
+## How to use
+
+1. Return a single root. Use `<>...</>`, or `<Fragment key={id}>` when the fragment itself needs a key inside a list.
+2. Embed values with curly braces. Compute complex values in variables **above** the `return` instead of inline.
+3. For conditions, prefer early `return` for whole-component states, a ternary for either/or, and `&&` only with a boolean left side.
+4. Render lists with `items.map((item) => <Item key={item.id} ... />)`. Put the `key` on the **outermost** element returned by `map`.
+5. Keys must be **unique among siblings** and **stable** across renders. Use database ids, slugs, or ids created when the item is created (`crypto.randomUUID()` at creation time, never during render).
+6. Return `null` to render nothing.
+
+## Use-case demos
+
+### Use case 1: status badge with a lookup object
+
+```tsx
+type Status = "pending" | "paid" | "failed" | "refunded";
+
+const statusStyles: Record<Status, { label: string; className: string }> = {
+  pending: { label: "Pending", className: "bg-amber-100 text-amber-800" },
+  paid: { label: "Paid", className: "bg-emerald-100 text-emerald-800" },
+  failed: { label: "Failed", className: "bg-red-100 text-red-800" },
+  refunded: { label: "Refunded", className: "bg-zinc-100 text-zinc-700" },
+};
+
+function StatusBadge({ status }: { status: Status }) {
+  const { label, className } = statusStyles[status];
+  return <span className={`rounded-full px-2 py-0.5 text-xs ${className}`}>{label}</span>;
+}
+```
+
+### Use case 2: grouped list with keyed fragments
+
+```tsx
+import { Fragment } from "react";
+
+function Glossary({ terms }: { terms: { id: string; term: string; definition: string }[] }) {
+  return (
+    <dl>
+      {terms.map((t) => (
+        <Fragment key={t.id}>
+          <dt className="font-semibold">{t.term}</dt>
+          <dd className="mb-2 text-zinc-600">{t.definition}</dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
+}
+```
+
+### Use case 3: filtered list with an empty state
+
+```tsx
+function ProductGrid({ products, query }: { products: Product[]; query: string }) {
+  const visible = products.filter((p) => p.name.toLowerCase().includes(query.toLowerCase()));
+
+  if (visible.length === 0) {
+    return <p className="text-zinc-500">No products match "{query}".</p>;
+  }
+
+  return (
+    <ul className="grid grid-cols-3 gap-4">
+      {visible.map((p) => (
+        <li key={p.id}>
+          <ProductCard product={p} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+See [List filtering](/react/list-filtering) for a full search + filter example.
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- `count && <X />` renders `0`. Always compare: `count > 0 && <X />`.
+- `key={Math.random()}` or `key={crypto.randomUUID()}` in render creates a new key every time, so React **remounts** every row (lost state, lost focus, slow).
+- Index keys are fine **only** for static lists that never reorder, filter, or have stateful children.
+- `key` is not passed to the component as a prop. If the child needs the id, pass it separately (`id={item.id}`).
+- Don't define components inside other components to "conditionally render" them. They get a new identity every render and remount. See [Rendering](/fundamentals/rendering).
+- Changing a component's `key` on purpose is a valid way to **reset its state** (for example `<Profile key={userId} />`).
+</Callout>
+
+## Interview questions
+
+<QA q="What does JSX compile to?" level="junior">
+
+JSX is compiled to function calls that create plain JavaScript objects called React elements. With the modern automatic runtime (React 17+), `<div className="a">hi</div>` becomes `jsx("div", { className: "a", children: "hi" })` imported from `react/jsx-runtime`, which is why you no longer need `import React` in every file. The older transform produced `React.createElement("div", { className: "a" }, "hi")`. The browser never sees JSX.
+
+</QA>
+
+<QA q="Why do lists need keys, and why is the array index a bad key?" level="junior">
+
+Keys let React's reconciliation match each element in the new list to the same element in the previous list, so it can keep state and DOM nodes and only move, insert or remove what changed. With index keys, inserting at the top or deleting an item shifts every index, so React thinks item 0 is still item 0 and reuses its state and DOM for different data. Symptoms are inputs showing the wrong text, wrong checkboxes checked, and animations on the wrong row. Index keys are acceptable only for static lists that never change order.
+
+</QA>
+
+<QA q="Why does 'items.length && List' sometimes render a 0 on screen?" level="junior">
+
+`&&` returns the left operand if it is falsy, otherwise the right operand. When `items.length` is `0`, the expression evaluates to `0`, and React renders numbers as text, so a `0` appears. `false`, `null`, `undefined` and `true` render nothing. Fix it with a real boolean: `items.length > 0 && <List />` or a ternary that returns `null`.
+
+</QA>
+
+<QA q="What is a Fragment and when do you need the long form?" level="junior">
+
+A Fragment groups children without adding a DOM node, which matters for tables, flex and grid layouts, and keeping the DOM clean. The short syntax `<>...</>` covers most cases. You need `<Fragment key={id}>` when the fragment is the item returned from `map`, because the short syntax cannot take a `key` (or any prop).
+
+</QA>
+
+<QA q="What happens if you use Math.random() as a key?" level="mid">
+
+Every render generates a new key for every item, so React sees all items as brand new: it unmounts the old components and mounts new ones. That destroys local state, loses input focus, reruns effects, and is much slower than an update. Keys must be stable across renders, so generate ids when the data is created, not while rendering.
+
+</QA>
+
+<QA q="How can you use the key prop to reset a component's state?" level="mid">
+
+React keeps state as long as a component stays at the same position with the same type and key. If you change the key, React treats it as a different component, unmounts the old one and mounts a fresh one with initial state. For example `<EditForm key={user.id} user={user} />` resets the form whenever you switch users, without writing an effect to sync state from props.
+
+</QA>
+
+<QA q="Why can't you write an if statement inside JSX curly braces?" level="mid">
+
+Curly braces accept **expressions** because JSX compiles to function arguments, and you can't pass a statement as an argument. `if`, `for` and `switch` are statements, so use a ternary, `&&`, a helper function, or compute the value in a variable before the `return`. Many teams prefer early returns or a lookup object for anything beyond a simple either/or.
+
+</QA>
+
+<QA q="Do keys need to be globally unique?" level="senior">
+
+No. Keys only need to be unique **among siblings** in the same array, because React compares children of one parent at a time. Two different lists can both contain an item with key `1`. The key also does not reach the component as a prop; React uses it internally for reconciliation, so pass the id separately if the child needs it.
+
+</QA>

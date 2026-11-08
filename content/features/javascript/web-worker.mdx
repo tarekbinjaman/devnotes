@@ -150,3 +150,47 @@ self.onmessage = (e) => {
 - Workers don't help with **network** waiting. That's already async.
 - Not worth it for work under ~50 ms.
 </Callout>
+
+## Interview questions
+
+<QA q="What is a Web Worker, and what problem does it solve?" level="junior">
+
+A Web Worker runs a JavaScript file on a separate background thread. The main thread handles both your JavaScript and rendering/input, so a long computation there (parsing a big file, sorting 1M rows) freezes the UI: no clicks, no scrolling, no animations. Moving that work into a worker keeps the main thread free, and the worker sends the result back with `postMessage`.
+
+</QA>
+
+<QA q="What can't a Web Worker do?" level="junior">
+
+Workers have no access to the DOM, `window` or `document`, and can't directly update the UI. They communicate with the main thread only through messages. They do have access to many APIs: `fetch`, timers, `IndexedDB`, WebSockets, `OffscreenCanvas` and more. The global object inside a dedicated worker is `self` (a `DedicatedWorkerGlobalScope`).
+
+</QA>
+
+<QA q="How is data passed between the main thread and a worker, and what does it cost?" level="mid">
+
+By default `postMessage` copies the data using the **structured clone** algorithm, so each side has its own copy and there's no shared mutable state. Cloning large objects takes time and memory on the sending thread. For big binary data, pass **Transferable** objects like `ArrayBuffer` in the transfer list: ownership moves to the worker with no copy, and the buffer becomes unusable (detached) on the sender. `SharedArrayBuffer` allows true shared memory but requires cross-origin isolation headers and careful use of `Atomics`.
+
+</QA>
+
+<QA q="The page freezes for 2 seconds when importing a CSV. How would you diagnose and fix it?" level="mid">
+
+Record a trace in the Chrome DevTools Performance panel and look for a long task in the main thread, then see which function takes the time (probably parsing). Fixes: move parsing into a Web Worker and post back the parsed rows (or better, only what the UI needs); stream and parse in chunks; and render the result with virtualization. If the work can't move to a worker, break it into chunks and yield to the main thread between them with `setTimeout`, or `scheduler.yield()` where supported.
+
+</QA>
+
+<QA q="Web Worker vs async/await: aren't promises already non-blocking?" level="mid">
+
+Promises and `async`/`await` make **waiting** non-blocking (network, timers, disk), but the JavaScript code itself still runs on the main thread. A CPU-heavy loop inside an `async` function blocks just as much as a normal one. Workers give you actual parallelism for computation. So: async for I/O, workers for CPU work.
+
+</QA>
+
+<QA q="How do you use a Web Worker in a React or Next.js app?" level="senior">
+
+Create the worker in an effect with `new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })`, which bundlers like webpack, Vite and Next.js understand. Set up `onmessage`, and call `worker.terminate()` in the cleanup. Wrap it in a custom hook that exposes a function returning a Promise. Libraries like Comlink hide the message plumbing so you can call worker functions as if they were async local functions. In Next.js, workers only exist in the browser, so create them in Client Components.
+
+</QA>
+
+<QA q="When is a Web Worker not worth it?" level="senior">
+
+When the work is small (well under one frame, or under ~50 ms total), the overhead of starting the worker and copying data costs more than it saves. When the bottleneck is rendering or DOM work, which a worker can't do. When the input or output is huge and must be copied, unless you can use transferables. And when the real problem is too much data: paginate, filter on the server, or use a better algorithm first.
+
+</QA>

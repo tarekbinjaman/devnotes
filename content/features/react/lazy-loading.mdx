@@ -138,3 +138,47 @@ function LazyOnView({ children, height = 400 }: { children: React.ReactNode; hei
 - Too many tiny chunks cause a waterfall of requests. Split big things, not every button.
 - `ssr: false` means no HTML for that part on the server, which is bad for SEO content.
 </Callout>
+
+## Interview questions
+
+<QA q="What is code splitting, and why does it improve performance?" level="junior">
+
+Code splitting breaks your JavaScript bundle into smaller chunks that load on demand instead of shipping everything up front. Less JavaScript on the initial load means less to download, parse and execute, which improves metrics like LCP and INP, especially on slow phones. Bundlers create a split point wherever you use a dynamic `import()`. Next.js already splits by route automatically.
+
+</QA>
+
+<QA q="How do React.lazy and Suspense work together?" level="junior">
+
+`React.lazy(() => import('./Chart'))` returns a component whose code is loaded the first time it renders. While the chunk is loading, the component suspends, and the nearest `Suspense` boundary shows its `fallback` (a spinner or skeleton). Once loaded, React renders the real component and keeps the code cached. The imported module must have a default export (or you map a named export to `default`).
+
+</QA>
+
+<QA q="What should you lazy-load and what should you not?" level="mid">
+
+Good candidates: heavy components not needed for first paint (charts, rich text editors, maps, modals, admin-only panels), big libraries used only after an interaction (PDF export, date libraries for a picker), and below-the-fold content. Don't lazy-load above-the-fold content like the header or hero: it delays the most important paint and can cause layout shift. Avoid splitting tiny components, which just adds requests.
+
+</QA>
+
+<QA q="next/dynamic vs React.lazy?" level="mid">
+
+`next/dynamic` is Next.js's wrapper around `React.lazy` and `Suspense`. It adds a `loading` option and `ssr: false` to skip server rendering for components that only work in the browser (for example ones that use `window`). In the App Router, `ssr: false` is only allowed inside Client Components. Also note that Server Components are already not shipped as JavaScript, so lazy loading is mainly useful for heavy Client Components.
+
+</QA>
+
+<QA q="How do you avoid the lazy-loaded component appearing with a noticeable delay?" level="senior">
+
+Preload the chunk before it's needed: call the dynamic `import()` on hover or focus of the button that opens the modal, or when the browser is idle. Use a skeleton fallback with the same dimensions to avoid layout shift. For content that scrolls into view, trigger loading slightly before it's visible with an `IntersectionObserver` `rootMargin`. And keep chunk boundaries meaningful so one interaction doesn't trigger a waterfall of small requests.
+
+</QA>
+
+<QA q="How do you handle a lazy chunk that fails to load?" level="senior">
+
+A failed dynamic import (network error, or an old chunk deleted after a new deploy) throws during render, so wrap lazy components in an error boundary that shows a retry or a 'reload' message. A common fix for deploy-related failures is to reload the page once when a chunk load error occurs, since the new HTML points to the new chunks. Keeping old assets available for a while after deploy also helps.
+
+</QA>
+
+<QA q="How do you lazy-load images properly?" level="mid">
+
+Use the native `loading='lazy'` attribute (or `next/image`, which is lazy by default) for below-the-fold images, and always give images dimensions or an `aspect-ratio` to prevent layout shift. Don't lazy-load the LCP image (usually the hero): load it eagerly and mark it high priority, for example with `fetchpriority='high'` on an `img`, or the preload/priority prop of `next/image` (check the name for your Next.js version).
+
+</QA>

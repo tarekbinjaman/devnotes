@@ -2,7 +2,7 @@
 title: Virtual DOM & Reconciliation
 summary: How React compares UI trees and updates only what changed in the real DOM.
 category: fundamentals
-order: 5
+order: 8
 difficulty: intermediate
 tags: [virtual-dom, reconciliation, keys, internals]
 technologies: [Virtual DOM, Reconciliation, Diffing, Keys, Fiber]
@@ -124,3 +124,55 @@ async function onSubmit(data: FormData) {
 - Duplicate keys cause warnings and wrong updates.
 - Moving a component into a different parent element changes its position, so its state resets.
 </Callout>
+
+## Interview questions
+
+<QA q="What is the virtual DOM? Explain it simply." level="junior">
+
+It's a lightweight JavaScript description of the UI: plain objects (React elements) saying 'a `div` with this class containing this text'. When state changes, React builds a new description, compares it to the previous one, and applies only the differences to the real DOM. You write UI declaratively ('this is what it should look like') and React works out the imperative DOM updates.
+
+</QA>
+
+<QA q="Is the virtual DOM faster than the real DOM?" level="mid">
+
+Not inherently. A hand-written, perfectly targeted DOM update will always beat building a tree and diffing it. The virtual DOM's value is that it gives **good enough** performance automatically while letting you write declarative code, and it avoids the common mistakes of manual DOM code (layout thrashing, unnecessary re-creation). Frameworks like Svelte and Solid show you can skip the virtual DOM entirely with compile-time or fine-grained reactivity, so it's a design trade-off, not a requirement.
+
+</QA>
+
+<QA q="What is reconciliation, and what assumptions make it fast?" level="mid">
+
+Reconciliation is React's process of comparing the new element tree with the previous one to decide what to update. A general tree diff is O(n³), so React uses two heuristics to make it O(n): elements of **different types** produce entirely different trees (React tears down the old subtree and builds a new one), and **keys** identify which children in a list are the same item between renders. Same type at the same position means React keeps the DOM node and component state and just updates props.
+
+</QA>
+
+<QA q="Why shouldn't you use the array index as a key?" level="junior">
+
+Keys tell React which item is which between renders. With index keys, inserting, removing or reordering items shifts every index, so React thinks item 0 is still item 0 and reuses its DOM node and state for a different item. Symptoms: input values or checkboxes ending up on the wrong row, wrong animations, extra work. Use a stable unique ID from the data. Index keys are acceptable only for static lists that never reorder or filter.
+
+</QA>
+
+<QA q="How can you use a key to reset a component's state on purpose?" level="mid">
+
+Changing a component's `key` makes React treat it as a different component, so it unmounts the old one and mounts a fresh one with initial state. For example, `<ProfileForm key={userId} />` resets the form whenever you switch users, and changing a counter-based key after a successful submit clears a form. This is cleaner than an effect that manually resets several state variables when a prop changes.
+
+</QA>
+
+<QA q="What is React Fiber?" level="senior">
+
+Fiber is the reconciliation engine introduced in React 16. Each component instance has a fiber node, a unit of work that React can process, pause, resume or throw away. That makes rendering **interruptible**, which enables concurrent features in React 18+: transitions (`startTransition`, `useTransition`), `useDeferredValue` and Suspense, where urgent updates like typing can interrupt a slow, non-urgent render. The commit to the DOM is still done in one synchronous step so the user never sees a half-updated UI.
+
+</QA>
+
+<QA q="What's wrong with this code?" level="senior">
+
+```tsx
+return isEditing ? (
+  <div><Form /></div>
+) : (
+  <section><Form /></section>
+);
+```
+
+The `Form` sits under a `div` in one branch and a `section` in the other. Because the parent element type changes, React throws away the whole subtree and remounts `Form`, losing its state (typed text, focus) every time `isEditing` toggles. Keep the same parent type and position (for example, toggle a class instead), or lift the form state up if it must survive the swap.
+
+</QA>

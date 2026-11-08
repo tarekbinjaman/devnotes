@@ -155,3 +155,55 @@ export function useUrlFilter(key: string) {
 - Inline objects/functions passed to memoized rows (`onClick={() => ...}`) break `memo`. Use `useCallback`.
 - If the data lives on the server and is large (10k+ rows), filter **on the server** instead. See [Server-side filtering & pagination](/backend/server-filtering-pagination).
 </Callout>
+
+## Interview questions
+
+<QA q="Should the filtered list be stored in state?" level="junior">
+
+No. The filtered list can be computed from the full list and the filter values, so store only the inputs (the list and the query) and derive the result during render. Storing it separately means keeping two pieces of state in sync, which leads to bugs when one is updated and the other isn't. If the computation is expensive, memoize it with [useMemo](/fundamentals/use-memo).
+
+</QA>
+
+<QA q="The input lags when typing in a filter box over 5,000 items. How do you debug and fix it?" level="mid">
+
+Profile with React DevTools to see whether the time goes to the filter calculation or to rendering the rows. Then, depending on the cause: memoize the filtering with `useMemo`; wrap rows in `memo` with stable props so unchanged rows skip rendering; use `useDeferredValue(query)` so the input updates immediately and the list re-renders in the background; and [virtualize](/css/virtualized-list) the list so only visible rows are in the DOM. If the data is much larger or lives on the server, filter on the server.
+
+</QA>
+
+<QA q="How does useDeferredValue work?" level="mid">
+
+`const deferredQuery = useDeferredValue(query)` returns the old value during the urgent render, so the input updates right away, then React re-renders in the background with the new value. That background render is interruptible: if the user types again, React abandons it and starts over with the latest value. It only helps if the slow component re-renders based on the deferred value and is memoized (or its work is in `useMemo`), otherwise it re-renders with the urgent update anyway. You can compare `query !== deferredQuery` to show a 'stale' style while it catches up.
+
+</QA>
+
+<QA q="useDeferredValue vs useTransition?" level="senior">
+
+Both mark work as non-urgent. `useTransition` wraps the **state update** (`startTransition(() => setFilter(x))`), so you need access to the setter; it gives you an `isPending` flag. `useDeferredValue` wraps a **value**, which is handy when the value comes from props or you don't control the update. Note you can't use a transition for a controlled input's own value, since typing must be urgent: keep the input state urgent and defer the expensive derived part.
+
+</QA>
+
+<QA q="How do you keep filters in the URL, and why would you?" level="mid">
+
+Store filters in query parameters (`?category=shoes&maxPrice=100`) and read them as the source of truth, for example with `useSearchParams` in Next.js, updating with `router.replace` to avoid filling the history with every keystroke. Benefits: links are shareable and bookmarkable, filters survive refresh, and back/forward navigation works. Validate and parse the params because users can edit the URL.
+
+</QA>
+
+<QA q="When should filtering move to the server?" level="senior">
+
+When the dataset is too large to send to the browser (tens of thousands of rows or more), when it changes often, or when users shouldn't receive all of it for security reasons. Client-side filtering is great for small to medium datasets already loaded, because it's instant. Server-side filtering with pagination and proper indexes scales but adds latency per change, so you debounce the requests. See [Server-side filtering & pagination](/backend/server-filtering-pagination).
+
+</QA>
+
+<QA q="What's wrong with this code?" level="junior">
+
+```tsx
+const [query, setQuery] = useState("");
+const [filtered, setFiltered] = useState(items);
+useEffect(() => {
+  setFiltered(items.filter((i) => i.name.includes(query)));
+}, [query]);
+```
+
+The filtered list is redundant state, updated in an effect: every keystroke renders twice (once with stale results), and because `items` is missing from the dependencies, new items never appear until the query changes. Compute it during render instead: `const filtered = useMemo(() => items.filter((i) => i.name.includes(query)), [items, query]);`. Searches are usually case-insensitive too, so lowercase both sides.
+
+</QA>

@@ -133,3 +133,59 @@ export const getProduct = cache(async (slug: string) => {
 - `JSON.stringify` keys are slow for big objects and depend on key order.
 - Cached mutable objects can be changed by a caller and corrupt the cache. Return copies or freeze them.
 </Callout>
+
+## Interview questions
+
+<QA q="What is memoization, and which functions can be safely memoized?" level="junior">
+
+Memoization stores the result of a function call keyed by its arguments, so a repeated call with the same arguments returns the stored result instead of recomputing. It's only safe for **pure** functions: same inputs always give the same output and there are no side effects. Memoizing something that depends on time, randomness, or external mutable state returns wrong, stale answers.
+
+</QA>
+
+<QA q="Implement a memoize function for single-argument functions." level="junior">
+
+```ts
+function memoize<A, R>(fn: (arg: A) => R) {
+  const cache = new Map<A, R>();
+  return (arg: A): R => {
+    if (cache.has(arg)) return cache.get(arg)!;
+    const result = fn(arg);
+    cache.set(arg, result);
+    return result;
+  };
+}
+```
+
+A `Map` compares keys with SameValueZero, so primitives work by value but objects only match by reference. Using `has` instead of checking the value means `undefined` results are cached too. Follow-ups interviewers like: multiple arguments, cache size limits, and caching async results.
+
+</QA>
+
+<QA q="How would you memoize a function with multiple or object arguments?" level="mid">
+
+Options: build a string key (`JSON.stringify(args)`), which is simple but slow for large objects and sensitive to property order; use nested `Map`s, one level per argument; or use a custom key function supplied by the caller (`memoize(fn, (a, b) => a.id + ':' + b)`). For object arguments that should be cached by identity, a `WeakMap` keyed on the object works well.
+
+</QA>
+
+<QA q="Map vs WeakMap for a cache?" level="mid">
+
+A `Map` holds strong references to its keys, so cached entries are never garbage-collected: a memory leak if the keys are objects you're done with. A `WeakMap` only accepts objects (and non-registered symbols) as keys and holds them weakly, so when nothing else references the key object, the entry can be collected. The trade-off: `WeakMap` isn't iterable and has no `size`, and it can't be keyed by strings or numbers.
+
+</QA>
+
+<QA q="What is an LRU cache, and why would you need one?" level="mid">
+
+An unbounded cache grows forever. LRU (least recently used) caps the number of entries and evicts the one that hasn't been accessed for the longest time. In JavaScript you can build one with a `Map`, since it preserves insertion order: on a hit, delete and re-insert the key to mark it as recent; on insert, if over capacity, delete the first key from `map.keys()`. In production, `lru-cache` on npm adds TTLs and size limits.
+
+</QA>
+
+<QA q="Why cache the Promise instead of the resolved value for API calls?" level="senior">
+
+If you cache only the resolved value, two calls made at the same time both miss the cache and both send a request. Caching the **Promise** immediately means concurrent callers share the same in-flight request (request deduplication). You must remove the entry if the promise rejects, otherwise a temporary failure is cached forever. Add a TTL so data doesn't stay stale indefinitely.
+
+</QA>
+
+<QA q="What are the hard problems with caching in general?" level="senior">
+
+Invalidation (knowing when cached data is stale and must be refreshed), memory growth (needing eviction and size limits), and correctness when inputs aren't pure or are mutated after caching. Caching also makes bugs harder to reproduce because behavior depends on what's already cached. Before adding a cache, measure that the work is actually expensive and repeated, and decide upfront how entries expire.
+
+</QA>

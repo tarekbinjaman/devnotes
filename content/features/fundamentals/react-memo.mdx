@@ -2,7 +2,7 @@
 title: React.memo
 summary: Skip re-rendering a child component when its props haven't changed.
 category: fundamentals
-order: 10
+order: 14
 difficulty: intermediate
 tags: [memo, performance, re-render, memoization]
 technologies: [React.memo, Shallow comparison, useCallback, useMemo]
@@ -131,3 +131,51 @@ const Chart = memo(
 - Don't wrap everything. Comparing props for cheap components costs more than just rendering them.
 - A custom comparison that ignores props can show **stale UI**. Prefer stabilizing the props.
 </Callout>
+
+## Interview questions
+
+<QA q="What does React.memo do?" level="junior">
+
+`memo(Component)` returns a version of the component that skips re-rendering when its parent re-renders with the **same props**. React compares each prop with the previous one using `Object.is` (a shallow comparison). It does not stop re-renders caused by the component's own state or by a context it reads changing.
+
+</QA>
+
+<QA q="What's wrong with this code?" level="junior">
+
+```tsx
+const Row = memo(function Row({ item, onSelect }: RowProps) { /* ... */ });
+
+function List({ items }: { items: Item[] }) {
+  return items.map((item) => (
+    <Row key={item.id} item={item} onSelect={() => select(item.id)} />
+  ));
+}
+```
+
+`onSelect` is a new arrow function on every render of `List`, so every `Row` sees a changed prop and re-renders: the `memo` does nothing. Pass a stable function, for example `const handleSelect = useCallback((id) => select(id), [])` and `onSelect={handleSelect}`, and let `Row` call it with its own `item.id`.
+
+</QA>
+
+<QA q="What is shallow comparison, and why does it matter here?" level="mid">
+
+Shallow comparison checks each prop with `Object.is`: primitives are equal if their values match, but objects, arrays and functions are equal only if they're the **same reference**. Two objects with identical contents created on different renders are not equal. That's why `memo` needs to be paired with `useMemo`/`useCallback` (or values defined outside the component) for any non-primitive prop.
+
+</QA>
+
+<QA q="Why not wrap every component in memo?" level="mid">
+
+Comparing props has a cost on every render, and for cheap components it's often more than just re-rendering them. Many components receive new objects, functions or `children` every time, so memo would never actually skip anything. It also adds noise and makes it easy to get stale UI with custom comparators. Use it where profiling shows an expensive component re-rendering with the same props, such as large list rows or heavy charts.
+
+</QA>
+
+<QA q="What is the second argument to memo, and when should you use it?" level="senior">
+
+`memo(Component, arePropsEqual)` lets you supply a custom comparison that returns `true` when the props are equal (skip the render). It's useful in rare cases, like comparing only an `id` and `updatedAt` instead of a big object. The risk: if you ignore a prop that actually affects output (including callbacks that close over new values), the component shows stale UI. Also, a deep equality check can be slower than re-rendering. Prefer stabilizing props instead.
+
+</QA>
+
+<QA q="Alternatives to memo for preventing expensive re-renders?" level="senior">
+
+Move state down so the expensive component isn't under the state that changes, or lift the expensive part up and pass it as `children` to the component that re-renders often (its element doesn't change, so React skips it). Split contexts so the component doesn't subscribe to fast-changing values. And the React Compiler memoizes components and values automatically, which covers most cases where you'd reach for manual `memo`.
+
+</QA>

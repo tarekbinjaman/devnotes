@@ -124,3 +124,70 @@ window.addEventListener("scroll", onScroll, { passive: true });
 - For infinite scroll, `IntersectionObserver` is usually better than a throttled scroll listener.
 - Don't debounce actions that must feel instant (button clicks, toggles).
 </Callout>
+
+## Interview questions
+
+<QA q="What is the difference between debounce and throttle?" level="junior">
+
+Debounce waits until events **stop** for a given time, then runs once: good for search inputs, autosave, and resize-end. Throttle runs at most once per interval **while** events keep coming: good for scroll position, drag, and mouse-move handlers. A simple way to explain it: debounce is an elevator door that waits until people stop entering; throttle is a turnstile that lets one person through every second.
+
+</QA>
+
+<QA q="Implement a basic debounce function." level="mid">
+
+```ts
+function debounce<T extends (...args: any[]) => void>(fn: T, wait: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return (...args: Parameters<T>) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), wait);
+  };
+}
+```
+
+Each call cancels the pending timer and starts a new one, so `fn` only runs after `wait` ms of silence, with the latest arguments. The closure holds `timer` between calls. Common follow-ups: add a `cancel()` method, support a leading-edge option, and preserve `this` if it's used as a method.
+
+</QA>
+
+<QA q="Implement a basic throttle function." level="mid">
+
+```ts
+function throttle<T extends (...args: any[]) => void>(fn: T, wait: number) {
+  let last = 0;
+  return (...args: Parameters<T>) => {
+    const now = Date.now();
+    if (now - last >= wait) {
+      last = now;
+      fn(...args);
+    }
+  };
+}
+```
+
+This is the leading-edge version: it runs immediately, then ignores calls until `wait` has passed. Its weakness is that the final call in a burst may be dropped, so production versions (like lodash's) also schedule a trailing call so the last state is always handled.
+
+</QA>
+
+<QA q="What are leading and trailing edges?" level="mid">
+
+They control **when** within a burst the function runs. Trailing (the default for debounce) runs after the burst ends, with the last arguments. Leading runs on the first event immediately, then suppresses the rest. Leading is useful for preventing double submits (react to the first click, ignore rapid repeats); trailing is what you want for 'search after typing stops'. lodash's `debounce` and `throttle` accept `leading` and `trailing` options.
+
+</QA>
+
+<QA q="Why use requestAnimationFrame for scroll or resize visual updates?" level="senior">
+
+`requestAnimationFrame` runs your callback right before the browser's next paint, at most once per frame (typically 60 times per second, more on high-refresh screens). Throttling a visual update to rAF means you do the work exactly when it can be shown, never more often than the screen can display, and it's paused in background tabs. For many scroll cases, better tools exist: `IntersectionObserver` for visibility and infinite scroll, `ResizeObserver` for element size, and CSS scroll-driven animations.
+
+</QA>
+
+<QA q="How do you use debounce correctly inside a React component?" level="senior">
+
+The debounced function must survive re-renders, so create it once (with `useMemo` or `useRef`), and cancel pending calls on unmount in an effect cleanup. To avoid a stale closure while keeping the debounced function stable, have it call the latest callback through a ref. Often simpler: debounce the **value** with a small `useDebouncedValue` hook built on `setTimeout` in an effect, and react to the debounced value. See [Debounced Search](/react/debounced-search).
+
+</QA>
+
+<QA q="A user reports the autosave sometimes loses their last edit. What could be wrong?" level="senior">
+
+With a trailing debounce, the last change is only saved after the wait. If the user closes the tab or navigates away within that window, the pending call never runs. Fixes: flush the pending save on `visibilitychange` (when the page becomes hidden) or before route changes, use `navigator.sendBeacon` or `fetch` with `keepalive` for the final save, and show a 'Saving...' or 'Unsaved changes' indicator. Another cause can be a debounce recreated on every render, which resets or duplicates timers.
+
+</QA>

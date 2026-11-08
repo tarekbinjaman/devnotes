@@ -2,7 +2,7 @@
 title: Custom Hooks
 summary: Extract reusable stateful logic into your own useSomething functions.
 category: fundamentals
-order: 13
+order: 18
 difficulty: intermediate
 tags: [hooks, custom-hooks, reuse, patterns]
 technologies: [Custom hooks, useState, useEffect, useCallback, TypeScript generics]
@@ -165,3 +165,55 @@ function useSearch(query: string) {
 - Never call hooks conditionally (`if (x) useFetch(…)`). Pass `null` to skip instead, like `useFetch(null)` above.
 - For production data fetching, React Query/SWR are battle-tested `useFetch` replacements with caching.
 </Callout>
+
+## Interview questions
+
+<QA q="What is a custom hook, and why are they named with 'use'?" level="junior">
+
+A custom hook is a function whose name starts with `use` and that calls other hooks, so you can extract and reuse stateful logic (fetching, form handling, media queries) across components. The `use` prefix tells React's lint rules and the React Compiler that the function follows the Rules of Hooks, so they can check that it's called unconditionally at the top level. A function that doesn't call any hooks should be a normal utility without the prefix.
+
+</QA>
+
+<QA q="If two components use the same custom hook, do they share state?" level="junior">
+
+No. Each call to a hook gets its own independent state, exactly as if each component had written the `useState` and `useEffect` calls itself. Custom hooks share **logic**, not state. To share data between components, lift it up, use [Context](/fundamentals/context-api), or use an external store (which you can wrap in a hook, such as with `useSyncExternalStore`).
+
+</QA>
+
+<QA q="What are the Rules of Hooks, and why do they exist?" level="mid">
+
+Call hooks only at the top level of a component or custom hook (not inside conditions, loops, nested functions or after an early return) and only from React functions, not regular JavaScript functions. React identifies each hook by its **call order** within a component, so if the order changes between renders, state gets attached to the wrong hook. To 'skip' a hook conditionally, call it unconditionally and pass an argument that disables it, like `useFetch(null)`.
+
+</QA>
+
+<QA q="What's wrong with this code?" level="mid">
+
+```tsx
+function Profile({ userId }: { userId?: string }) {
+  if (!userId) return null;
+  const user = useUser(userId);
+  return <h1>{user.name}</h1>;
+}
+```
+
+The hook is called after an early return, so it runs on some renders and not others. When `userId` goes from undefined to a value, React sees a different number of hooks and throws an error. Call `useUser` before the return (with a hook that accepts an undefined or null id and does nothing), or render a child component that calls the hook only when `userId` exists.
+
+</QA>
+
+<QA q="How do you design a good custom hook API?" level="mid">
+
+Give it a clear, specific purpose (`useOnlineStatus`, `useDebouncedValue`) rather than a generic lifecycle wrapper like `useMount`. Return an object for many values (easy to extend) or a tuple for a `useState`-like pair. Return stable functions with `useCallback` so callers can use them as dependencies, keep inputs minimal, type it with generics where data shape varies, and handle cleanup inside the hook so callers can't forget it.
+
+</QA>
+
+<QA q="Custom hooks vs higher-order components and render props?" level="senior">
+
+All three reuse logic, but HOCs and render props wrap components, which leads to 'wrapper hell' in DevTools, prop name collisions, and unclear origins of props. Hooks compose as plain function calls inside a component, are easier to type in TypeScript, and make it obvious where each value comes from. HOCs and render props still appear in older libraries, but hooks are the default way to share stateful logic today.
+
+</QA>
+
+<QA q="How do you test a custom hook?" level="senior">
+
+Use `renderHook` from React Testing Library, which renders the hook inside a test component and gives you `result.current`. Wrap state changes in `act`, and use `waitFor` for async updates. For data-fetching hooks, mock the network (MSW is common) instead of the hook's internals. Often the best test is through a real component that uses the hook, because that checks behavior rather than implementation.
+
+</QA>

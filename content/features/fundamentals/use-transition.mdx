@@ -1,0 +1,245 @@
+---
+title: useTransition & useDeferredValue
+summary: Mark slow updates as non-urgent so typing and clicking stay responsive while heavy UI renders in the background.
+category: fundamentals
+order: 15
+difficulty: advanced
+tags: [hooks, concurrent, useTransition, useDeferredValue, performance]
+technologies: [useTransition, startTransition, useDeferredValue, isPending, Concurrent rendering]
+updated: 2026-11-08
+---
+
+## What it is
+
+React 18 introduced **concurrent rendering**: React can prepare a new UI in the background, **pause** that work to handle something more important, and throw away a render that's already outdated. You opt in by marking updates as **non-urgent**.
+
+- **Urgent updates**: typing, clicking, pressing. Users expect instant feedback.
+- **Transition (non-urgent) updates**: changing the visible list, switching tabs, rendering a chart. A short delay is fine.
+
+Two hooks expose this:
+
+| | `useTransition` | `useDeferredValue` |
+| --- | --- | --- |
+| You control | The **state update** (wrap the setter) | A **value** you receive |
+| Returns | `[isPending, startTransition]` | A lagging copy of the value |
+| Use when | You own the setter | The value comes from props or a library |
+
+```tsx
+const [isPending, startTransition] = useTransition();
+startTransition(() => setTab("reports")); // can be interrupted
+
+const deferredQuery = useDeferredValue(query); // "catches up" when React has time
+```
+
+Neither hook makes rendering faster. They change **priority**, so the slow part doesn't block the fast part.
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard (janky)">
+
+```tsx
+// ❌ Every keystroke re-renders 10,000 rows synchronously. Typing lags.
+function ProductSearch({ products }: { products: Product[] }) {
+  const [query, setQuery] = useState("");
+  const filtered = products.filter((p) => p.name.toLowerCase().includes(query.toLowerCase()));
+
+  return (
+    <>
+      <input value={query} onChange={(e) => setQuery(e.target.value)} />
+      <ProductList items={filtered} />
+    </>
+  );
+}
+
+// ❌ Clicking a heavy tab freezes the whole UI until it renders
+<button onClick={() => setTab("analytics")}>Analytics</button>
+```
+
+</Tab>
+<Tab label="useDeferredValue">
+
+```tsx
+// ✅ Input updates immediately; the list renders with a deferred value
+function ProductSearch({ products }: { products: Product[] }) {
+  const [query, setQuery] = useState("");
+  const deferredQuery = useDeferredValue(query);
+  const isStale = query !== deferredQuery;
+
+  return (
+    <>
+      <input value={query} onChange={(e) => setQuery(e.target.value)} />
+      <div style={{ opacity: isStale ? 0.5 : 1 }}>
+        <ProductList query={deferredQuery} products={products} />
+      </div>
+    </>
+  );
+}
+
+// The slow child must be memoized so it can skip urgent re-renders
+const ProductList = memo(function ProductList({ query, products }: ListProps) {
+  const filtered = products.filter((p) => p.name.toLowerCase().includes(query.toLowerCase()));
+  return <ul>{filtered.map((p) => <li key={p.id}>{p.name}</li>)}</ul>;
+});
+```
+
+</Tab>
+<Tab label="useTransition">
+
+```tsx
+// ✅ Tab switch is a transition: the old tab stays interactive while the new one renders
+function Dashboard() {
+  const [tab, setTab] = useState<"overview" | "analytics">("overview");
+  const [isPending, startTransition] = useTransition();
+
+  const selectTab = (next: typeof tab) => {
+    startTransition(() => setTab(next));
+  };
+
+  return (
+    <>
+      <nav className={isPending ? "opacity-60" : ""}>
+        <button onClick={() => selectTab("overview")}>Overview</button>
+        <button onClick={() => selectTab("analytics")}>Analytics</button>
+      </nav>
+      {tab === "overview" ? <Overview /> : <SlowAnalytics />}
+    </>
+  );
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why this keeps the UI responsive">
+- React renders the urgent update (the input's new value) first and commits it right away.
+- The transition / deferred render happens in the background and **yields to the browser** regularly, so new keystrokes and clicks are handled immediately.
+- If the user types again before the background render finishes, React **discards** the stale render and starts over with the latest value, instead of finishing outdated work.
+- `isPending` (or comparing `query !== deferredQuery`) lets you show that the content is updating without blocking input.
+</Callout>
+
+## How to use
+
+1. Find the slow update with the React DevTools Profiler. These hooks help when **rendering** is slow, not when the network is.
+2. If you own the state setter, wrap the non-urgent update: `startTransition(() => setX(value))`. Keep controlled input state **outside** the transition.
+3. If you only receive the value, use `const deferred = useDeferredValue(value)` and pass `deferred` to the slow part.
+4. Wrap the slow child in [React.memo](/fundamentals/react-memo) (or compute with [useMemo](/fundamentals/use-memo)) so it can skip re-rendering during the urgent pass.
+5. Show a pending hint with `isPending` or `value !== deferred` (dim the content, small spinner).
+6. With Suspense, transitions keep the **old UI visible** instead of falling back to a spinner when new content suspends.
+7. Outside components, use the standalone `startTransition` imported from `react` (no `isPending`).
+
+## Use-case demos
+
+### Use case 1: filter a large list while typing
+
+```tsx
+function EmployeeDirectory({ employees }: { employees: Employee[] }) {
+  const [filter, setFilter] = useState("");
+  const deferredFilter = useDeferredValue(filter);
+
+  const visible = useMemo(
+    () => employees.filter((e) => e.name.toLowerCase().includes(deferredFilter.toLowerCase())),
+    [employees, deferredFilter],
+  );
+
+  return (
+    <>
+      <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Search" />
+      <EmployeeTable rows={visible} stale={filter !== deferredFilter} />
+    </>
+  );
+}
+```
+
+See [List filtering](/react/list-filtering) for the complete pattern, and [Debounced search](/react/debounced-search) for when the slow part is a network request.
+
+### Use case 2: async transition (React 19)
+
+```tsx
+function SaveButton({ draft }: { draft: Draft }) {
+  const [isPending, startTransition] = useTransition();
+
+  const handleSave = () => {
+    startTransition(async () => {
+      await api.saveDraft(draft);
+      startTransition(() => router.refresh()); // updates after await need their own transition
+    });
+  };
+
+  return <button onClick={handleSave} disabled={isPending}>{isPending ? "Saving..." : "Save"}</button>;
+}
+```
+
+### Use case 3: router-style navigation that keeps the old page visible
+
+```tsx
+function App() {
+  const [page, setPage] = useState("/");
+  const [isPending, startTransition] = useTransition();
+
+  const navigate = (url: string) => startTransition(() => setPage(url));
+
+  return (
+    <Layout dimmed={isPending}>
+      <Suspense fallback={<PageSpinner />}>
+        {/* during a transition, React keeps showing the old page instead of the fallback */}
+        <Router page={page} navigate={navigate} />
+      </Suspense>
+    </Layout>
+  );
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Don't** put a controlled input's own state update inside a transition. The input must update synchronously, or characters get dropped/lag.
+- `useDeferredValue` without `memo`/`useMemo` on the slow part does nothing useful: the slow child still re-renders on the urgent pass.
+- Transitions don't make code faster and don't debounce network requests. For "fetch after the user stops typing", debounce instead.
+- In React 18, the function passed to `startTransition` must be **synchronous**; state updates after an `await` are not marked. React 19 supports async functions, but updates after an `await` still need another `startTransition` wrap.
+- If the slow part is a single long synchronous computation (not rendering many components), it can't be interrupted. Consider memoization, virtualization, or a Web Worker.
+</Callout>
+
+## Interview questions
+
+<QA q="What problem does useTransition solve?" level="mid">
+
+It lets you mark a state update as non-urgent so that expensive re-renders don't block urgent interactions like typing or clicking. React renders the transition in the background, interrupts it if a more urgent update comes in, and discards it if it's outdated. `isPending` tells you a transition is in progress, so you can show feedback while the old UI stays interactive.
+
+</QA>
+
+<QA q="What is the difference between useTransition and useDeferredValue?" level="mid">
+
+`useTransition` wraps the **state update** itself, so you need access to the setter, and it gives you `isPending`. `useDeferredValue` wraps a **value**, returning a version that lags behind during urgent renders, which is useful when the value comes from props or a third-party hook. Under the hood both use the same transition priority.
+
+</QA>
+
+<QA q="How is useDeferredValue different from debouncing?" level="senior">
+
+Debouncing waits a fixed delay before doing anything, even on a fast machine, and it doesn't interrupt work once started. `useDeferredValue` has no fixed delay: on a fast device the deferred render happens almost immediately, and on a slow device it is interruptible, so keystrokes are never blocked. Debouncing is still the right tool for reducing **network requests**, because React deferring renders doesn't reduce how many times you fetch.
+
+</QA>
+
+<QA q="What does concurrent rendering mean in React 18?" level="senior">
+
+Rendering can be interruptible: React can start rendering an update, pause to handle a higher-priority one, then resume or abandon the original work. Only updates you mark as transitions (or deferred values, Suspense-related updates) render this way; normal updates are still synchronous and blocking. The committed DOM is always consistent, because React only commits a fully finished render.
+
+</QA>
+
+<QA q="Why should you not wrap an input's onChange state update in startTransition?" level="mid">
+
+Controlled inputs need their value updated synchronously on every keystroke; if the update is a transition, React may delay or interrupt it and the input appears laggy or loses characters. The correct pattern is to keep the input's state urgent and either put a second state update (like the filter used by the list) in the transition, or derive a deferred value with `useDeferredValue`.
+
+</QA>
+
+<QA q="How do transitions interact with Suspense?" level="senior">
+
+If an update inside a transition causes a component to suspend, React keeps showing the **previous** content (with `isPending` true) instead of replacing it with the nearest Suspense fallback. Without a transition, already-visible content would be hidden behind a spinner. This is why routers like Next.js App Router wrap navigations in transitions.
+
+</QA>
+
+<QA q="Can startTransition be async?" level="senior">
+
+In React 19, yes: you can pass an async function (an "Action"), and `isPending` stays true until it resolves. State updates that happen after an `await` are not automatically included, though, so you wrap them in another `startTransition`. In React 18 the callback had to be synchronous, and any update after an `await` ran as a normal urgent update.
+
+</QA>

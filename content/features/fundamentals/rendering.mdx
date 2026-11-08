@@ -2,7 +2,7 @@
 title: Rendering & Re-renders
 summary: When and why components re-render, and how to keep re-renders cheap.
 category: fundamentals
-order: 4
+order: 7
 difficulty: intermediate
 tags: [rendering, re-render, performance, react-devtools]
 technologies: [Render phase, Commit phase, Batching, React DevTools Profiler]
@@ -141,3 +141,47 @@ function useWhyDidYouRender(name: string, props: Record<string, unknown>) {
 - In development with Strict Mode, components render **twice** on purpose to catch impure code. Production renders once.
 - Calling `setState` during render (outside a condition) causes an infinite loop.
 </Callout>
+
+## Interview questions
+
+<QA q="What causes a component to re-render?" level="junior">
+
+Three things: its own state changes, its parent re-renders, or a context it reads changes. A change in props alone is not a separate trigger, since props only change when the parent re-renders. Note that by default a parent's re-render re-renders **all** of its children, whether or not their props changed, unless a child is wrapped in [React.memo](/fundamentals/react-memo).
+
+</QA>
+
+<QA q="Does re-rendering mean React updates the DOM?" level="junior">
+
+No. Rendering means React calls your component to get new JSX (the render phase). React then compares it with the previous result and, in the commit phase, touches only the DOM nodes that actually changed. A re-render with identical output produces no DOM changes, so it costs only the JavaScript work of running the component and diffing.
+
+</QA>
+
+<QA q="What are the render and commit phases?" level="mid">
+
+In the **render phase** React calls components and computes what the UI should look like. This must be pure, because React can pause, restart or discard it in concurrent rendering. In the **commit phase** React applies the changes to the DOM, attaches refs, and then runs layout effects (synchronously, before paint) and later regular effects (after paint). That's why side effects go in effects or event handlers, never in the render body.
+
+</QA>
+
+<QA q="What is automatic batching?" level="mid">
+
+Since React 18, multiple state updates in the same tick are grouped into a single re-render, whether they happen in an event handler, a `setTimeout`, a promise or a native event listener. Before React 18, only updates inside React event handlers were batched. If you really need to apply an update synchronously (for example to measure the DOM right after), `flushSync` from `react-dom` forces it, but that is rarely needed.
+
+</QA>
+
+<QA q="The page feels slow when typing in a form. How would you find out what is re-rendering?" level="mid">
+
+Open React DevTools, turn on 'Highlight updates when components render', and type to see which parts flash. Then record with the **Profiler** tab with 'Record why each component rendered' enabled: it shows which components rendered, how long each took and why (state, props, context, parent). Typical fixes: move the input's state down into a smaller component so only it re-renders, pass expensive siblings as `children`, memoize a slow child with `memo`, or use `useDeferredValue` for an expensive result that depends on the input. Measure again after each change.
+
+</QA>
+
+<QA q="Why does my component render twice in development?" level="mid">
+
+Strict Mode intentionally calls components (and initializers, reducers, `useMemo` callbacks) twice in development, and also runs effects mount, cleanup, mount. The goal is to expose impure rendering and missing effect cleanups. It doesn't happen in production builds, so don't 'fix' it by removing Strict Mode; fix the code that behaves differently when run twice.
+
+</QA>
+
+<QA q="How do you prevent unnecessary re-renders without memoizing everything?" level="senior">
+
+Prefer structural fixes first: keep state as close as possible to where it's used (state colocation), pass stable subtrees as `children` so they don't re-render with the wrapper, split contexts so fast-changing values don't re-render everyone, and avoid storing derived values in state. Only then use `memo` plus `useMemo`/`useCallback` for components that are measurably slow. The React Compiler can add this memoization automatically, which reduces the need for manual tuning but doesn't fix a badly placed state.
+
+</QA>

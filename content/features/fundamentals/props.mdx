@@ -2,7 +2,7 @@
 title: Props
 summary: How data flows one way, from parent to child, through read-only props.
 category: fundamentals
-order: 2
+order: 3
 difficulty: beginner
 tags: [props, data-flow, typescript, basics]
 technologies: [Props, TypeScript types, Default values, children]
@@ -135,3 +135,54 @@ function Button({ variant = "primary", className = "", ...rest }: ButtonProps) {
 - Spreading unknown props onto DOM elements (`{...props}`) can pass invalid attributes. Pick what you need.
 - New object/function props every render (`style={{...}}`, `onClick={() => ...}`) break [React.memo](/fundamentals/react-memo). That's fine unless you're optimizing.
 </Callout>
+
+## Interview questions
+
+<QA q="What is the difference between props and state?" level="junior">
+
+Props are inputs passed **into** a component by its parent; the component must treat them as read-only. State is data a component **owns** and can change with its setter, which triggers a re-render. A simple way to explain it: props are like function arguments, state is like the component's memory. The same value is often state in a parent and a prop in its child.
+
+</QA>
+
+<QA q="Why are props read-only? What happens if you mutate them?" level="junior">
+
+React's data flow is one-way: the parent owns the data and the child only describes UI from it. If a child mutates a prop object, React doesn't know anything changed (no setter was called), so the screen won't update reliably, and the parent's data is silently corrupted. Memoization (`memo`, `useMemo`) also breaks because it compares references. To change data, the child calls a callback prop and the owner updates its state.
+
+</QA>
+
+<QA q="What is prop drilling, and how do you avoid it?" level="mid">
+
+Prop drilling is passing a prop through several intermediate components that don't use it, just to reach a deep child. It is not always bad, since it makes the data flow explicit. Fixes, in the order I'd try them: restructure with composition (pass the deep child as `children` so the middle layers don't need the prop), then [Context](/fundamentals/context-api) for widely needed values like theme or current user, and a state library (Zustand, Redux Toolkit) for complex shared state that changes often.
+
+</QA>
+
+<QA q="What's wrong with this code?" level="mid">
+
+```tsx
+function EditName({ initialName }: { initialName: string }) {
+  const [name, setName] = useState(initialName);
+  return <input value={name} onChange={(e) => setName(e.target.value)} />;
+}
+```
+
+Nothing, as long as `initialName` really is just an initial value. The bug appears when the parent later passes a different `initialName` (say, the user picks another record): `useState` only reads its argument on the first render, so the input keeps showing the old name. Either make the component controlled (use the prop directly and call an `onChange` prop), or reset it by rendering `<EditName key={user.id} ... />` so a new `key` remounts it with fresh state.
+
+</QA>
+
+<QA q="What is the children prop and when would you use it?" level="junior">
+
+`children` is whatever JSX you put between a component's opening and closing tags. It lets you build wrapper components (layouts, cards, modals, providers) that don't need to know what they render. It also helps performance: a wrapper that re-renders because of its own state doesn't re-render `children` that were created by its parent, because those elements didn't change.
+
+</QA>
+
+<QA q="What is the difference between a controlled and an uncontrolled input?" level="mid">
+
+A controlled input gets its `value` from React state and reports changes through `onChange`, so React is the single source of truth: easy to validate, format or reset. An uncontrolled input keeps its own value in the DOM; you set a `defaultValue` and read it with a ref or from `FormData` on submit. Controlled is the default choice for interactive forms; uncontrolled is simpler for basic forms, file inputs, and React 19 form actions that read `FormData`.
+
+</QA>
+
+<QA q="How do you type props in TypeScript for a reusable Button that should accept all native button attributes?" level="senior">
+
+Extend the native props type, for example `type ButtonProps = React.ComponentPropsWithoutRef<'button'> & ...` plus your own fields like `variant`. Destructure your custom props and spread the rest onto the `button`, so `onClick`, `disabled`, `type` and `aria-*` all work and are type-checked. Default `type` to `'button'` so it doesn't accidentally submit forms. In React 19 `ref` is a normal prop for function components, so you can use `ComponentPropsWithRef` instead of `forwardRef`.
+
+</QA>

@@ -2,7 +2,7 @@
 title: useRef
 summary: Keep a mutable value or a DOM element reference across renders without triggering re-renders.
 category: fundamentals
-order: 7
+order: 11
 difficulty: beginner
 tags: [hooks, useRef, dom, refs]
 technologies: [useRef, DOM refs, forwardRef, ref as prop]
@@ -152,3 +152,54 @@ const TextInput18 = forwardRef<HTMLInputElement, React.ComponentProps<"input">>(
 - Don't read or write refs during render (except lazy init). It makes the output unpredictable.
 - Refs aren't a way to avoid "too many re-renders". If the UI shows it, it's state.
 </Callout>
+
+## Interview questions
+
+<QA q="What is the difference between useRef and useState?" level="junior">
+
+Both keep a value between renders. Updating state with its setter triggers a re-render, and the value is a snapshot per render. A ref is a mutable object, `{ current: ... }`, that you can change at any time and changing it does **not** re-render. Rule of thumb: if the value is shown on screen, it's state; if it's bookkeeping the UI doesn't display (timer IDs, previous values, DOM nodes), it's a ref.
+
+</QA>
+
+<QA q="What are the two main use cases for useRef?" level="junior">
+
+First, getting access to a DOM element: pass the ref to JSX (`ref={inputRef}`) and call `inputRef.current.focus()`, measure size, or scroll into view. Second, storing a mutable value that persists across renders without causing re-renders: interval IDs, a flag like 'has this already run', the previous value of a prop, or the latest callback for use inside a long-lived listener.
+
+</QA>
+
+<QA q="Why is ref.current null when I read it during the first render?" level="mid">
+
+React attaches DOM refs during the **commit** phase, after rendering. During the first render the DOM node doesn't exist yet, so `ref.current` is still `null`. Read DOM refs in event handlers or effects, which run after commit. This is also why you shouldn't read or write refs during render: the value isn't tied to the render that's happening, so the output becomes unpredictable.
+
+</QA>
+
+<QA q="How do you pass a ref to your own component?" level="mid">
+
+In React 19, `ref` is a regular prop for function components, so you accept `ref` in the props and forward it to the inner element. Before React 19 you had to wrap the component in `forwardRef`, which still works but is planned to be deprecated. If you want to expose only specific methods (like `focus` or `scrollToBottom`) instead of the raw DOM node, use `useImperativeHandle`.
+
+</QA>
+
+<QA q="What's wrong with this code?" level="mid">
+
+```tsx
+function Counter() {
+  const count = useRef(0);
+  return <button onClick={() => count.current++}>Clicked {count.current}</button>;
+}
+```
+
+The value increments, but changing a ref doesn't trigger a re-render, so the button text stays at 0 until something else re-renders the component. Because the number is displayed, it must be state: `const [count, setCount] = useState(0)` and `setCount((c) => c + 1)`.
+
+</QA>
+
+<QA q="What is a callback ref and when is it useful?" level="senior">
+
+Instead of a ref object you can pass a function to the `ref` attribute. React calls it with the DOM node when it's attached and (before React 19) with `null` when it's detached; in React 19 the function can also return a cleanup function. Callback refs are useful when you need to react to the node appearing, for example measuring it or attaching a `ResizeObserver`/`IntersectionObserver`, or when managing refs for a dynamic list of items (store nodes in a `Map` keyed by ID).
+
+</QA>
+
+<QA q="How do you implement a 'latest value' ref, and why is it useful?" level="senior">
+
+Keep a ref that you update to the newest callback or value after each render (in an effect, for example `useLayoutEffect(() => { ref.current = callback })`), then read `ref.current` inside a long-lived subscription or interval. The subscription can be set up once and still always call the latest logic, without re-subscribing every time the callback changes. React's `useEffectEvent` hook is designed for this pattern; check that it's available in your React version before using it.
+
+</QA>

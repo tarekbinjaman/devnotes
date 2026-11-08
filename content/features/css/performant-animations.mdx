@@ -138,3 +138,47 @@ el.animate(
 - `transform` creates a new stacking context, which can affect `z-index` and `position: fixed` children.
 - Keep UI animations short: 150–300 ms.
 </Callout>
+
+## Interview questions
+
+<QA q="Why are transform and opacity the cheapest properties to animate?" level="junior">
+
+The browser renders in steps: style, layout, paint, composite. Changing `width`, `top` or `margin` triggers layout (recalculating positions of other elements) and paint on every frame. `transform` and `opacity` can usually be handled in the **composite** step alone: the element is already painted on its own layer, and the GPU just moves or fades it. That leaves more of each 16 ms frame budget free and keeps animations smooth.
+
+</QA>
+
+<QA q="What is layout thrashing, and how do you avoid it?" level="mid">
+
+Layout thrashing is when JavaScript alternates reading layout values (`offsetHeight`, `getBoundingClientRect()`) and writing styles in a loop. Each read after a write forces the browser to recalculate layout synchronously, many times per frame. Avoid it by batching: do all reads first, then all writes, ideally inside `requestAnimationFrame`. Better still, animate with CSS transforms or the Web Animations API so you don't read layout every frame.
+
+</QA>
+
+<QA q="What does will-change do, and what's the risk of overusing it?" level="mid">
+
+`will-change: transform` hints that an element is about to animate, so the browser can promote it to its own compositor layer ahead of time and avoid a jank spike at the start. Each layer uses GPU memory, so applying it to many elements (or permanently, like `* { will-change: transform }`) can make performance worse, especially on mobile. Apply it to a few elements that really animate, ideally just before the animation, and remove it afterwards.
+
+</QA>
+
+<QA q="A sidebar animation is janky on mobile. How would you debug it?" level="mid">
+
+Record in the Chrome DevTools Performance panel (with CPU throttling) and look for long frames and purple 'Layout' or green 'Paint' work during the animation. Turn on 'Paint flashing' and the Layers panel in Rendering tools to see what's repainting. The usual cause is animating `left`, `width` or `margin`; switch to `transform: translateX(...)`. Also check for heavy `box-shadow` or `filter` animations, and JavaScript running on every frame.
+
+</QA>
+
+<QA q="How do you respect users who prefer reduced motion?" level="junior">
+
+Use the `prefers-reduced-motion` media query: inside `@media (prefers-reduced-motion: reduce)`, remove or shorten large movements (parallax, slide-ins, auto-playing motion) and use simple fades or no animation instead. In JavaScript, check `window.matchMedia('(prefers-reduced-motion: reduce)').matches`. This is an accessibility issue: large motion can cause dizziness or nausea for people with vestibular disorders (WCAG 2.3.3).
+
+</QA>
+
+<QA q="CSS transitions vs CSS animations vs the Web Animations API vs a JS library?" level="senior">
+
+Transitions animate between two states when a property changes (hover, class toggle) and are the simplest choice. `@keyframes` animations handle multi-step or looping motion without state changes. The Web Animations API (`element.animate()`) gives JavaScript control (play, pause, reverse, `finished` promise) while still running on the compositor for transform/opacity. Libraries like Motion add springs, gesture handling, and layout animations (FLIP) at the cost of bundle size. Pick the simplest one that meets the need.
+
+</QA>
+
+<QA q="How would you animate an element's height (like an accordion) smoothly?" level="senior">
+
+Animating `height` triggers layout every frame, and you can't transition to `height: auto` with classic CSS. Options: animate a CSS grid row from `grid-template-rows: 0fr` to `1fr` (well supported and auto-sized); use `interpolate-size: allow-keywords` or `calc-size()` where supported to transition to `auto`; or use the FLIP technique: measure start and end sizes, then animate a `transform: scaleY` instead. For small content, the layout cost of the grid approach is usually fine.
+
+</QA>

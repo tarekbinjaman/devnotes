@@ -1,0 +1,261 @@
+---
+title: Portals
+summary: Render children into a different DOM node (like document.body) while keeping them in the same React tree.
+category: fundamentals
+order: 21
+difficulty: intermediate
+tags: [portals, modals, dom, accessibility]
+technologies: [createPortal, Modals, Tooltips, Focus management, dialog element]
+updated: 2026-11-08
+---
+
+## What it is
+
+`createPortal(children, domNode)` from `react-dom` renders `children` into **a different place in the DOM**, usually `document.body`, while they stay **in the same place in the React tree**.
+
+Why you need it: a modal or tooltip rendered deep inside a card inherits that card's `overflow: hidden`, `z-index` stacking context and `transform`, so it gets **clipped** or appears **behind** other content. Moving its DOM node to `body` escapes all of that.
+
+What stays the same because the React tree is unchanged:
+- **Context** from parents still works (theme, auth, router).
+- **Events bubble through the React tree**, not the DOM tree. A click inside a portal triggers `onClick` on React ancestors even though the DOM node lives in `body`.
+- Props and state work as usual; the portal unmounts when its parent unmounts.
+
+Typical uses: modals/dialogs, tooltips and popovers, dropdown menus, toasts/notifications, full-screen overlays.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ Modal rendered inline: clipped by overflow-hidden, z-index wars
+function ProductCard({ product }: { product: Product }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative overflow-hidden rounded-xl">
+      <button onClick={() => setOpen(true)}>Details</button>
+      {open && <div className="fixed inset-0 z-50">...</div>} {/* trapped in the card */}
+    </div>
+  );
+}
+
+// ❌ No focus handling, no Escape, no role: unusable with keyboard / screen readers
+function Modal({ children }: { children: React.ReactNode }) {
+  return createPortal(<div className="modal">{children}</div>, document.body);
+}
+
+// ❌ Touching document during SSR render: "document is not defined"
+const root = document.getElementById("modal-root")!;
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+import { createPortal } from "react-dom";
+
+type ModalProps = { open: boolean; onClose: () => void; title: string; children: React.ReactNode };
+
+export function Modal({ open, onClose, title, children }: ModalProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+
+  useEffect(() => {
+    if (!open) return;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    dialogRef.current?.focus(); // move focus into the dialog
+
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    document.addEventListener("keydown", onKey);
+    document.body.style.overflow = "hidden"; // lock background scroll
+
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = "";
+      previouslyFocused?.focus(); // restore focus to the trigger
+    };
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50" onClick={onClose}>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        className="rounded-xl bg-white p-6"
+        onClick={(e) => e.stopPropagation()} // clicks inside don't close
+      >
+        <h2 id={titleId}>{title}</h2>
+        {children}
+        <button onClick={onClose}>Close</button>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+```
+
+</Tab>
+<Tab label="Native dialog">
+
+```tsx
+// ✅ <dialog> + showModal(): top layer (no portal needed), focus, Escape and inert background built in
+function ConfirmDialog({ open, onClose, onConfirm }: ConfirmProps) {
+  const ref = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    const dialog = ref.current;
+    if (!dialog) return;
+    if (open && !dialog.open) dialog.showModal();
+    if (!open && dialog.open) dialog.close();
+  }, [open]);
+
+  return (
+    <dialog ref={ref} onClose={onClose} className="rounded-xl p-6 backdrop:bg-black/50">
+      <p>Delete this project?</p>
+      <button onClick={onClose}>Cancel</button>
+      <button onClick={onConfirm}>Delete</button>
+    </dialog>
+  );
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why the correct versions work">
+- The portal moves the modal's DOM to `body`, so no ancestor's `overflow`, `transform` or stacking context can clip or bury it.
+- `role="dialog"`, `aria-modal` and `aria-labelledby` tell screen readers it's a dialog with a name. Moving focus in, handling Escape and restoring focus to the trigger make it keyboard-usable.
+- `showModal()` puts a native `<dialog>` in the browser's **top layer**, above everything regardless of z-index, and gives you focus handling, Escape-to-close and an inert background for free.
+- Effects only run in the browser, so `document` access inside them is SSR-safe.
+</Callout>
+
+## How to use
+
+1. `import { createPortal } from "react-dom"` and return `createPortal(jsx, targetNode)` from your component.
+2. Target `document.body` or a dedicated node (`<div id="modal-root">` in your HTML / root layout).
+3. Only access `document` in the browser: inside effects, event handlers, or after a "mounted" flag in SSR apps.
+4. For modals: add `role="dialog"`, `aria-modal="true"`, a label, move focus in on open, **trap focus** (Tab stays inside), close on Escape, restore focus on close, and lock background scroll.
+5. Remember events bubble to React ancestors. Stop propagation inside the portal if a parent's click handler shouldn't fire.
+6. Consider native `<dialog>` with `showModal()` or a headless library (Radix UI, React Aria, Headless UI) instead of hand-rolling focus traps.
+
+## Use-case demos
+
+### Use case 1: toast container
+
+```tsx
+function Toaster({ toasts }: { toasts: Toast[] }) {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []); // SSR: render portal only on the client
+  if (!mounted) return null;
+
+  return createPortal(
+    <div aria-live="polite" className="fixed bottom-4 right-4 z-50 space-y-2">
+      {toasts.map((t) => (
+        <div key={t.id} role="status" className="rounded bg-zinc-900 px-4 py-2 text-white">
+          {t.message}
+        </div>
+      ))}
+    </div>,
+    document.body,
+  );
+}
+```
+
+### Use case 2: tooltip that escapes a scrolling container
+
+```tsx
+function Tooltip({ label, children }: { label: string; children: React.ReactElement }) {
+  const [rect, setRect] = useState<DOMRect | null>(null);
+
+  return (
+    <span
+      onMouseEnter={(e) => setRect(e.currentTarget.getBoundingClientRect())}
+      onMouseLeave={() => setRect(null)}
+    >
+      {children}
+      {rect &&
+        createPortal(
+          <div role="tooltip" className="fixed z-50 rounded bg-black px-2 py-1 text-xs text-white"
+            style={{ top: rect.bottom + 6, left: rect.left }}>
+            {label}
+          </div>,
+          document.body,
+        )}
+    </span>
+  );
+}
+```
+
+### Use case 3: events bubble through the React tree
+
+```tsx
+function Parent() {
+  return (
+    <div onClick={() => console.log("Parent saw the click")}>
+      {createPortal(<button>Inside portal</button>, document.body)}
+    </div>
+  );
+}
+// Clicking the button logs "Parent saw the click",
+// even though in the DOM the button is a child of <body>, not of the div.
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Event bubbling** follows the React tree: a click in a modal can trigger a parent card's `onClick` or a "click outside" handler. Stop propagation or check containment carefully.
+- A portal alone is **not** an accessible modal. You still need focus management, Escape, labels, and making the background inert.
+- `document` doesn't exist on the server. Create portals only on the client (effects or a mounted flag), or the target node won't exist during SSR.
+- CSS that depends on DOM ancestry (like `.card .title`) no longer applies inside a portal.
+- Don't portal things that don't need to escape: it adds complexity. If there's no clipping or stacking issue, render inline.
+- Stacking several portaled modals needs a strategy for focus and z-index; the native `<dialog>` top layer handles this better.
+</Callout>
+
+## Interview questions
+
+<QA q="What is a React portal and when would you use it?" level="junior">
+
+A portal renders children into a DOM node outside the parent component's DOM hierarchy using `createPortal(children, domNode)`. It's used for UI that must visually break out of its container: modals, tooltips, dropdowns, toasts. The component stays in the same place in the React tree, so it keeps access to context and parent state.
+
+</QA>
+
+<QA q="How does event bubbling work with portals?" level="mid">
+
+Synthetic events bubble according to the **React tree**, not the DOM tree. So a click inside a portal rendered into `body` will still trigger `onClick` handlers on the component's React ancestors. This is useful (a parent can handle events from its modal) but can surprise you, for example closing a dropdown or triggering a card's click handler; use `stopPropagation` where needed.
+
+</QA>
+
+<QA q="Why does a modal need a portal if it uses position: fixed?" level="mid">
+
+`position: fixed` is relative to the viewport only if no ancestor creates a containing block. An ancestor with `transform`, `filter` or `perspective` makes the fixed element position relative to that ancestor instead, and `overflow: hidden` can clip it. A parent's stacking context also caps its `z-index`. Rendering into `body` avoids all of these.
+
+</QA>
+
+<QA q="Does context work inside a portal?" level="junior">
+
+Yes. A portal only changes where the DOM nodes are placed; the React tree is unchanged, so context providers above the component still apply. Theme, auth, router and i18n context all work inside portaled modals, and the portal content unmounts when its owner unmounts.
+
+</QA>
+
+<QA q="How do you make a portal-based modal accessible?" level="senior">
+
+Give the container `role="dialog"` and `aria-modal="true"`, label it with `aria-labelledby` pointing to the title (use [useId](/fundamentals/use-id) for the id), move focus into the dialog on open, keep Tab focus trapped inside, close on Escape, and restore focus to the trigger on close. The background should be inert (`inert` attribute or `aria-hidden` on the app root) and scroll locked. In practice, many teams use native `<dialog>` with `showModal()` or Radix/React Aria, which implement all of this.
+
+</QA>
+
+<QA q="How do you use portals with server-side rendering?" level="senior">
+
+`createPortal` needs a real DOM node, and `document` isn't available during server rendering. Render the portal only after mount (a `mounted` state set in an effect), or only when the modal is open after user interaction, which always happens on the client. Some setups render a placeholder node in the root layout and look it up in an effect.
+
+</QA>
+
+<QA q="When would you use the native dialog element instead of a portal?" level="mid">
+
+When you need a modal or confirmation dialog: `dialog.showModal()` places it in the browser's top layer (above all z-index), makes the rest of the page inert, handles Escape, and manages focus, all without a portal or focus-trap library. Portals are still useful for non-modal floating UI like tooltips, dropdowns and toasts, or when you need full control over behaviour.
+
+</QA>

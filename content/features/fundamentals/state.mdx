@@ -2,7 +2,7 @@
 title: State
 summary: How React remembers data between renders and updates the screen when it changes.
 category: fundamentals
-order: 3
+order: 4
 difficulty: beginner
 tags: [state, useState, immutability, basics]
 technologies: [useState, Functional updates, Immutability, Lazy initial state]
@@ -143,3 +143,55 @@ function useLocalStorage<T>(key: string, initial: T) {
 - Don't store things that don't affect the UI (timer ids, previous values). Use [useRef](/fundamentals/use-ref).
 - Server data (API results) is usually better in React Query/SWR than in `useState` + `useEffect`.
 </Callout>
+
+## Interview questions
+
+<QA q="Why does console.log right after setState print the old value?" level="junior">
+
+Calling the setter doesn't change the variable in the current render. It **schedules** a re-render, and the new value only exists in the next call of your component. Within one render, state behaves like a snapshot: `count` is a constant for that render. If you need the next value right away, compute it into a local variable first and use that.
+
+</QA>
+
+<QA q="What's wrong with this code, and how do you fix it?" level="junior">
+
+```tsx
+function handleClick() {
+  setCount(count + 1);
+  setCount(count + 1);
+  setCount(count + 1);
+}
+```
+
+All three calls read the same `count` from this render's snapshot, so the count only goes up by 1. React also batches the updates into one re-render. Use the functional updater, `setCount((c) => c + 1)`, which receives the latest queued value, so three calls add 3. Use the updater whenever the new state depends on the previous one.
+
+</QA>
+
+<QA q="Why must state be updated immutably?" level="mid">
+
+React decides whether to re-render by comparing the old and new state with `Object.is`. If you mutate an object and pass the same reference back (`items.push(x); setItems(items)`), React sees no change and may skip the update. Memoized children and effects also compare references, so they would miss it too. Create new objects and arrays instead (`[...items, x]`, `{ ...user, name }`, `map`, `filter`), or use a helper like Immer for deeply nested updates.
+
+</QA>
+
+<QA q="How do you decide what should be state at all?" level="mid">
+
+Ask three questions: does it change over time? is it passed in from a parent (then it's a prop)? can it be computed from existing props or state (then compute it during render)? Only what's left should be state. Keep it minimal and avoid duplication: store the selected **ID**, not a copy of the selected object, and don't store `filteredList` next to `list` and `query`. Values that change but don't affect what's shown (timer IDs, previous values) belong in a [ref](/fundamentals/use-ref).
+
+</QA>
+
+<QA q="What is lazy initial state, and when do you need it?" level="mid">
+
+`useState(expensive())` calls `expensive()` on **every** render, even though React only uses the result the first time. Passing a function, `useState(() => expensive())` or `useState(readFromLocalStorage)`, makes React call it only on the initial render. Use it when the initial value requires real work, like parsing localStorage or building a large structure.
+
+</QA>
+
+<QA q="Where should state live: local, lifted, context, a global store, or a server cache?" level="senior">
+
+Start as local as possible and lift only when siblings need it. Use context for values many components read that change rarely (theme, locale, current user). Use a store like Zustand or Redux Toolkit for complex client state shared widely and updated often, because selectors avoid re-rendering every consumer. Data that comes from the server is really a cache, not UI state: React Query or SWR handle caching, deduplication, refetching and loading states better than `useState` plus `useEffect`. URL state (search params) is the right home for filters and pagination that should survive a refresh or be shareable.
+
+</QA>
+
+<QA q="Does React re-render if you set state to the same value?" level="senior">
+
+If the new value is identical to the current one by `Object.is`, React bails out and skips re-rendering the children and running effects. It may still call that one component's function once before bailing out, which is harmless if rendering is pure. This is why setting the same primitive is cheap, but setting a new object with the same contents always re-renders.
+
+</QA>

@@ -141,3 +141,47 @@ const v = useVirtualizer({ count: rowCount, getScrollElement: () => ref.current,
 - Under ~300 simple rows, virtualization adds complexity for no gain.
 - Consider **pagination** or **server-side filtering** first. Do users really need 50k rows on one screen?
 </Callout>
+
+## Interview questions
+
+<QA q="What is list virtualization, and how does it work?" level="junior">
+
+Virtualization (or windowing) renders only the rows visible in the viewport, plus a small buffer (overscan), instead of all of them. A tall inner container keeps the scrollbar correct, and visible rows are positioned with `transform: translateY` based on the scroll offset. As the user scrolls, rows leaving the view are removed and new ones are rendered, so the DOM holds a few dozen nodes instead of 100,000.
+
+</QA>
+
+<QA q="Why is rendering 10,000 rows slow even if React is fast?" level="junior">
+
+Each row creates DOM nodes, and the browser has to compute styles, lay out, and paint all of them, and keep them in memory. Initial render takes a long time, and every update to the list makes React reconcile 10,000 components. The cost is mostly in the browser's DOM and layout work, not just React, so the fix is to render fewer nodes.
+
+</QA>
+
+<QA q="What are the downsides of virtualization?" level="mid">
+
+Browser find (Ctrl+F) can't find rows that aren't rendered. Accessibility needs care: screen readers only see rendered rows, so set `aria-rowcount` and `aria-rowindex` (or `aria-setsize`/`aria-posinset`) so the total is announced. Variable or dynamic row heights need measuring, and fast scrolling can show blank areas briefly. It also adds complexity, and features like sticky headers, keyboard navigation and scroll restoration take extra work.
+
+</QA>
+
+<QA q="How do you virtualize rows with variable heights, like chat messages?" level="mid">
+
+Provide an `estimateSize` for unrendered rows, then measure each row's actual height after it renders (TanStack Virtual does this with `measureElement`, using a `ResizeObserver`) and update the position calculations. Expect small scroll adjustments as estimates are corrected, so good estimates help. For chat, you also need to keep scroll anchored to the bottom when new messages arrive and preserve position when older messages load above.
+
+</QA>
+
+<QA q="What is content-visibility: auto, and how does it compare to JS virtualization?" level="senior">
+
+`content-visibility: auto` tells the browser to skip layout and paint for off-screen elements until they approach the viewport. Pair it with `contain-intrinsic-size` so skipped elements keep an estimated size and the scrollbar stays stable. Unlike JS virtualization, all elements stay in the DOM, so Ctrl+F and accessibility work, but DOM memory and React's rendering cost remain. It's a cheap win for long pages with a few hundred heavy sections, not for 100,000 rows.
+
+</QA>
+
+<QA q="Virtualization vs pagination vs infinite scroll: how do you choose?" level="senior">
+
+Pagination is simplest, keeps URLs shareable ('page 3'), and works well for search results and admin tables. Infinite scroll suits feeds where users browse, but the DOM keeps growing, so it's often combined with virtualization, and it makes reaching the footer hard. Virtualization is for when users truly need one long scrollable list (logs, spreadsheets, chat). Often the best answer is less data: better filters and [server-side pagination](/backend/server-filtering-pagination).
+
+</QA>
+
+<QA q="A virtualized list shows blank rows when scrolling fast. What would you check?" level="senior">
+
+Increase the overscan so more rows are rendered beyond the viewport. Make rows cheap to render: `memo` the row component, avoid heavy effects or images that block, and make sure keys are stable so rows aren't remounted. Check that size estimates are close to reality so positions don't jump. Profile to see if something else, like a scroll listener doing state updates on every event, is blocking the main thread.
+
+</QA>

@@ -2,7 +2,7 @@
 title: useCallback
 summary: Keep the same function reference between renders so memoized children and effects don't re-run.
 category: fundamentals
-order: 9
+order: 13
 difficulty: intermediate
 tags: [hooks, useCallback, performance, memoization]
 technologies: [useCallback, React.memo, Referential equality]
@@ -133,3 +133,53 @@ function useEvent<A extends unknown[], R>(fn: (...a: A) => R) {
 - Missing deps give **stale closures**: the function sees old state. Trust the exhaustive-deps lint rule.
 - `onClick={() => handle(id)}` inside the memo child itself is fine. Stability matters for **props crossing into** memoized components.
 </Callout>
+
+## Interview questions
+
+<QA q="What problem does useCallback solve? Explain it simply." level="junior">
+
+Functions defined in a component are recreated on every render, so they're a new reference each time even if the code is identical. That's usually fine, but it breaks two things: a child wrapped in [React.memo](/fundamentals/react-memo) sees a 'changed' prop and re-renders anyway, and an effect that depends on the function re-runs every render. `useCallback(fn, deps)` returns the same function reference until a dependency changes.
+
+</QA>
+
+<QA q="Does useCallback make the function cheaper to create?" level="junior">
+
+No. The inline function is still created on every render; `useCallback` just returns the cached one instead of the new one. So it doesn't save work by itself, and it adds a dependency comparison. Its only benefit is **referential stability**, which only matters if something compares the reference: a `memo` child, a hook dependency array, or a context value.
+
+</QA>
+
+<QA q="What's wrong with this code?" level="mid">
+
+```tsx
+const handleSave = useCallback(() => {
+  api.save(draft);
+}, []);
+```
+
+The dependency array is missing `draft`, so the function keeps the `draft` from the first render (a stale closure) and saves old data forever. Add `draft` to the dependencies; the exhaustive-deps lint rule catches this. If you want a stable function that still reads the latest value, use a functional state update or read from a ref instead of lying about dependencies.
+
+</QA>
+
+<QA q="I wrapped every handler in useCallback but the child still re-renders. Why?" level="mid">
+
+`useCallback` only helps if the child is wrapped in `memo`; otherwise the child re-renders whenever the parent does, regardless of props. Even with `memo`, one unstable prop is enough to break it: an inline object (`style={{...}}`), an array from `.filter()`, or JSX passed as `children`. Use the React DevTools Profiler to see which prop changed, then stabilize that one.
+
+</QA>
+
+<QA q="How do you keep a callback stable when it depends on frequently changing state?" level="senior">
+
+Options, from simplest: use a functional update (`setItems((prev) => [...prev, item])`) so the callback doesn't read the state at all and can have an empty dependency list; move the logic into a reducer and pass `dispatch`, which is always stable; or store the latest value in a ref and read `ref.current` in the callback. React's `useEffectEvent` is meant for functions called from effects that should see the latest values without re-triggering the effect, but it isn't a general replacement for passing callbacks to children.
+
+</QA>
+
+<QA q="Should custom hooks return functions wrapped in useCallback?" level="senior">
+
+Generally yes for reusable hooks. Callers may put the returned functions into effect dependencies or pass them to memoized components, and an unstable function would cause re-renders or effect loops they can't fix from outside. react.dev recommends wrapping functions returned from custom hooks in `useCallback`. With the React Compiler this is handled automatically for compiled code.
+
+</QA>
+
+<QA q="When would you choose not to use useCallback at all?" level="senior">
+
+When nothing compares the function's identity: handlers passed to plain DOM elements (`<button onClick>`) or to non-memoized children gain nothing. Adding it everywhere makes code harder to read and introduces stale-closure bugs when deps are wrong. Many teams only add it after profiling shows a problem, or rely on the React Compiler to do it automatically.
+
+</QA>

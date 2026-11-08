@@ -1,0 +1,251 @@
+---
+title: Suspense & Lazy Loading
+summary: Show a fallback while code or data loads, split bundles with React.lazy, and stream UI in Next.js.
+category: fundamentals
+order: 20
+difficulty: intermediate
+tags: [suspense, lazy, code-splitting, data-fetching, streaming, nextjs]
+technologies: [Suspense, React.lazy, use, TanStack Query, Next.js loading.tsx, Streaming SSR]
+updated: 2026-11-08
+---
+
+## What it is
+
+`<Suspense>` lets you declare **"show this fallback until everything inside is ready"**. When a child **suspends** (it isn't ready to render yet), React shows the nearest Suspense boundary's `fallback`, then swaps in the real content when it's ready.
+
+A component suspends when it is:
+- A **lazy component** whose code hasn't downloaded yet (`React.lazy`).
+- Reading data through a **Suspense-enabled** source: `use(promise)` in React 19, TanStack Query's `useSuspenseQuery`, SWR with `suspense: true`, Relay, or an async Server Component in Next.js.
+
+Suspense does **not** detect data fetched in a `useEffect`. The data source has to integrate with it.
+
+```tsx
+<Suspense fallback={<Spinner />}>
+  <Comments /> {/* suspends while loading */}
+</Suspense>
+```
+
+On the server, Suspense enables **streaming SSR**: the shell HTML is sent immediately with fallbacks, and each boundary's content streams in when ready (selective hydration makes it interactive in priority order). Next.js `loading.tsx` is just a Suspense boundary around a route segment.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ lazy() called inside the component: new component every render, state reset, refetch
+function Editor() {
+  const MarkdownPreview = lazy(() => import("./MarkdownPreview"));
+  return <MarkdownPreview />;
+}
+
+// ❌ Lazy component with no Suspense boundary above it: throws
+<MarkdownPreview />
+
+// ❌ Creating the promise during render: a new promise every render, suspends forever
+function Profile({ id }: { id: string }) {
+  const user = use(fetch(`/api/users/${id}`).then((r) => r.json()));
+  return <h1>{user.name}</h1>;
+}
+
+// ❌ One giant boundary: the whole page is a spinner until the slowest part loads
+<Suspense fallback={<FullPageSpinner />}>
+  <Header />
+  <Feed />
+  <Recommendations />
+</Suspense>
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ lazy() at module top level
+const MarkdownPreview = lazy(() => import("./MarkdownPreview"));
+
+function Editor({ showPreview }: { showPreview: boolean }) {
+  return (
+    <Suspense fallback={<p>Loading preview...</p>}>
+      {showPreview && <MarkdownPreview />}
+    </Suspense>
+  );
+}
+
+// ✅ Promise created outside render (Server Component, cache, or library) then read with use()
+async function Page({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const userPromise = getUser(id); // started on the server, not awaited
+  return (
+    <Suspense fallback={<ProfileSkeleton />}>
+      <Profile userPromise={userPromise} />
+    </Suspense>
+  );
+}
+
+// "use client" component
+function Profile({ userPromise }: { userPromise: Promise<User> }) {
+  const user = use(userPromise);
+  return <h1>{user.name}</h1>;
+}
+
+// ✅ Granular boundaries: fast parts show first
+<>
+  <Header />
+  <Suspense fallback={<FeedSkeleton />}><Feed /></Suspense>
+  <Suspense fallback={<SidebarSkeleton />}><Recommendations /></Suspense>
+</>
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why the correct version works">
+- `lazy()` must return the **same component** every render. Defining it at module level means the import runs once and React caches the result.
+- `use(promise)` suspends until the promise resolves, and React expects the **same promise** across re-renders. Creating it in render makes a new pending promise each time, so it never settles. Promises from Server Components, a cache, or a data library are stable.
+- Separate boundaries let each part reveal **independently**, so users see useful content sooner, and with streaming SSR the HTML for each part is sent as soon as it's ready.
+</Callout>
+
+## How to use
+
+1. **Code splitting**: `const Chart = lazy(() => import("./Chart"))` at the top level. The module must have a **default export** (or map it: `.then((m) => ({ default: m.Chart }))`).
+2. Wrap lazy or suspending components in `<Suspense fallback={...}>`. Use **skeletons** that match the final layout to avoid layout shift.
+3. Place boundaries around meaningful sections, not every component. Nested boundaries reveal outer content first, then inner.
+4. For data, use a Suspense-enabled library (`useSuspenseQuery`) or React 19 `use()` with a cached/stable promise.
+5. Combine with an [error boundary](/fundamentals/error-boundaries): Suspense handles **loading**, error boundaries handle **failure**. A rejected promise throws to the nearest error boundary.
+6. Use a [transition](/fundamentals/use-transition) for navigations so already-visible content isn't replaced by a fallback.
+7. In Next.js App Router, add `loading.tsx` per route segment, and wrap slow parts of a page in their own `<Suspense>` to stream them.
+
+## Use-case demos
+
+### Use case 1: lazy-load a heavy modal
+
+```tsx
+import { lazy, Suspense, useState } from "react";
+
+const ExportDialog = lazy(() => import("./ExportDialog")); // pulls in a big PDF library
+
+function Toolbar() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button onClick={() => setOpen(true)}>Export</button>
+      {open && (
+        <Suspense fallback={<DialogSkeleton />}>
+          <ExportDialog onClose={() => setOpen(false)} />
+        </Suspense>
+      )}
+    </>
+  );
+}
+```
+
+See [Lazy loading](/react/lazy-loading) for preloading on hover and route-based splitting.
+
+### Use case 2: Next.js loading.tsx and streaming
+
+```tsx
+// app/dashboard/loading.tsx: shown instantly while page.tsx loads
+export default function Loading() {
+  return <DashboardSkeleton />;
+}
+
+// app/dashboard/page.tsx
+export default function DashboardPage() {
+  return (
+    <>
+      <KpiCards /> {/* fast */}
+      <Suspense fallback={<TableSkeleton />}>
+        <SlowOrdersTable /> {/* async Server Component: streams in when its query finishes */}
+      </Suspense>
+    </>
+  );
+}
+
+async function SlowOrdersTable() {
+  const orders = await db.orders.findMany({ take: 50 });
+  return <OrdersTable orders={orders} />;
+}
+```
+
+### Use case 3: TanStack Query with Suspense
+
+```tsx
+import { useSuspenseQuery } from "@tanstack/react-query";
+
+function ProjectList() {
+  // data is always defined here: loading is handled by Suspense, errors by an error boundary
+  const { data } = useSuspenseQuery({ queryKey: ["projects"], queryFn: fetchProjects });
+  return <ul>{data.map((p) => <li key={p.id}>{p.name}</li>)}</ul>;
+}
+
+function ProjectsPage() {
+  return (
+    <ErrorBoundary fallback={<p>Couldn't load projects.</p>}>
+      <Suspense fallback={<ListSkeleton />}>
+        <ProjectList />
+      </Suspense>
+    </ErrorBoundary>
+  );
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- Suspense doesn't work with data fetched in `useEffect`. Use a Suspense-enabled source.
+- **Waterfalls**: if a parent suspends on its data and the child only starts fetching after the parent renders, the requests run one after another. Start requests early (in parallel) and pass promises down.
+- If an already-visible boundary suspends again due to a normal update, its content is replaced by the fallback. Use `startTransition` / `useDeferredValue` to keep the old UI.
+- `React.lazy` only supports **default exports** and client-side code splitting. In Next.js use `next/dynamic` for client components (it also supports `ssr: false`); Server Components are split automatically.
+- Too many tiny boundaries cause "popcorn" UI where spinners pop in and out. Group related content.
+- A lazy chunk can fail to load (deploy changed filenames, network). Put an error boundary around it with a retry.
+</Callout>
+
+## Interview questions
+
+<QA q="What is React Suspense?" level="junior">
+
+Suspense is a component that shows a `fallback` while something inside it isn't ready to render, such as lazily loaded code or data from a Suspense-enabled source. When the child is ready, React replaces the fallback with the content. It lets you declare loading states in the component tree instead of managing `isLoading` flags everywhere.
+
+</QA>
+
+<QA q="How does React.lazy work, and what are its requirements?" level="junior">
+
+`React.lazy(() => import("./Component"))` returns a component that triggers a dynamic import the first time it renders. The bundler splits that module into a separate chunk, and while it downloads the component suspends, so it must be rendered inside a `<Suspense>` boundary. The imported module must have a default export that is a React component, and `lazy` should be called at module level, not inside a component.
+
+</QA>
+
+<QA q="How does a component tell React it is not ready (suspends)?" level="senior">
+
+Conceptually it throws a pending promise during render (or calls `use(promise)` in React 19). React catches it, renders the nearest Suspense fallback, and retries rendering the component when the promise settles. Application code shouldn't throw promises manually; the mechanism is an implementation detail used by `lazy`, `use`, and Suspense-enabled libraries.
+
+</QA>
+
+<QA q="What is the use() hook in React 19?" level="mid">
+
+`use` reads the value of a resource, a promise or a context. With a promise, it suspends until it resolves and throws to an error boundary if it rejects. Unlike other hooks, it can be called inside conditions and loops. The promise should be stable, typically created in a Server Component or a cache and passed down, not created during a client render.
+
+</QA>
+
+<QA q="How do Suspense and error boundaries work together?" level="mid">
+
+Suspense handles the **pending** state and error boundaries handle the **rejected** state. If a lazy import fails or a promise read via `use` rejects, the error propagates to the nearest error boundary. A common pattern is an error boundary wrapping a Suspense boundary around each independent section, so each piece can load and fail independently.
+
+</QA>
+
+<QA q="What is streaming SSR and how does Suspense enable it?" level="senior">
+
+With streaming, the server sends the HTML shell immediately with Suspense fallbacks in place, then streams each boundary's HTML (with a small inline script to slot it in) as its data finishes. With selective hydration, React hydrates boundaries independently and prioritises the ones the user interacts with. Next.js App Router uses this: `loading.tsx` and `<Suspense>` around async Server Components define the streaming chunks.
+
+</QA>
+
+<QA q="Why does a Suspense fallback sometimes replace content that was already on screen, and how do you prevent it?" level="senior">
+
+If a component inside an already-revealed boundary suspends because of an urgent update (like changing a tab or route), React has nothing to show but the fallback, so the visible content disappears. Wrapping that update in `startTransition` (or using `useDeferredValue`) tells React to keep showing the old UI until the new one is ready. Routers integrated with Suspense do this for navigations.
+
+</QA>
+
+<QA q="How would you reduce bundle size in a React app?" level="mid">
+
+Split code at route level and for heavy, rarely used components (editors, charts, modals) with `React.lazy` or `next/dynamic`, preload on hover or intent, and analyse the bundle to find large dependencies. Also prefer tree-shakable imports and Server Components where possible, since their code never ships to the client.
+
+</QA>
