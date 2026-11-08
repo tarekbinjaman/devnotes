@@ -1,0 +1,137 @@
+---
+title: Props
+summary: How data flows one way, from parent to child, through read-only props.
+category: fundamentals
+order: 2
+difficulty: beginner
+tags: [props, data-flow, typescript, basics]
+technologies: [Props, TypeScript types, Default values, children]
+updated: 2026-11-08
+---
+
+## What it is
+
+**Props** (properties) are the inputs of a component, like arguments to a function. A parent passes them, and the child reads them.
+
+- Data flows **one way: down** (parent → child).
+- Props are **read-only**. A child must never change them.
+- When a parent re-renders with new props, the child re-renders with the new values.
+- Anything can be a prop: strings, numbers, objects, arrays, **functions** (callbacks) and **JSX** (`children`).
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ Mutating a prop
+function PriceTag({ product }: { product: Product }) {
+  product.price = product.price * 0.9; // changes the parent's object!
+  return <span>${product.price}</span>;
+}
+
+// ❌ Copying a prop into state: it goes stale when the parent changes it
+function Greeting({ name }: { name: string }) {
+  const [displayName] = useState(name); // never updates after the first render
+  return <h1>Hello {displayName}</h1>;
+}
+
+// ❌ Prop drilling through 4 levels that don't use it
+<Page user={user} />  →  <Layout user={user} />  →  <Sidebar user={user} />  →  <Avatar user={user} />
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ Typed props, defaults via destructuring, derive values instead of mutating
+type PriceTagProps = {
+  price: number;
+  discount?: number;          // optional
+  currency?: "USD" | "EUR";
+};
+
+function PriceTag({ price, discount = 0, currency = "USD" }: PriceTagProps) {
+  const final = price * (1 - discount); // ✅ derived, nothing mutated
+  return (
+    <span>
+      {new Intl.NumberFormat("en", { style: "currency", currency }).format(final)}
+    </span>
+  );
+}
+
+// ✅ Use the prop directly, no state copy
+function Greeting({ name }: { name: string }) {
+  return <h1>Hello {name}</h1>;
+}
+
+// ✅ Avoid drilling: pass the finished component down (composition)
+<Layout sidebar={<Sidebar avatar={<Avatar user={user} />} />} />
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it works this way">
+- **One-way data flow** makes bugs easy to trace: data has a single owner (whoever holds the state).
+- **Read-only props** mean a child can't break its parent's data by accident.
+- **Deriving** values during render keeps them in sync automatically, with no `useEffect` needed.
+</Callout>
+
+## How to use
+
+1. Define a `Props` type for every component.
+2. Destructure in the parameter list and set defaults there (`size = "md"`).
+3. To let a child change data, pass a **callback** (`onChange`, `onSelect`) and keep the state in the parent.
+4. Use `children` for content that goes inside a wrapper.
+5. If you pass a prop through 3+ components that don't use it, consider **composition** or [Context](/fundamentals/context-api).
+
+## Use-case demos
+
+### Use case 1: controlled input (parent owns the value)
+
+```tsx
+type TextFieldProps = { label: string; value: string; onChange: (v: string) => void; error?: string };
+
+function TextField({ label, value, onChange, error }: TextFieldProps) {
+  return (
+    <label className="block">
+      <span>{label}</span>
+      <input value={value} onChange={(e) => onChange(e.target.value)} aria-invalid={!!error} />
+      {error && <small className="text-red-600">{error}</small>}
+    </label>
+  );
+}
+
+// Parent
+const [email, setEmail] = useState("");
+<TextField label="Email" value={email} onChange={setEmail} error={!email.includes("@") ? "Invalid email" : undefined} />
+```
+
+### Use case 2: reusable Button extending native props
+
+```tsx
+type ButtonProps = React.ComponentProps<"button"> & { variant?: "primary" | "ghost" };
+
+function Button({ variant = "primary", className = "", ...rest }: ButtonProps) {
+  const styles = variant === "primary" ? "bg-indigo-600 text-white" : "bg-transparent";
+  return <button className={`rounded px-3 py-1.5 ${styles} ${className}`} {...rest} />;
+}
+
+<Button type="submit" disabled={saving} onClick={save}>Save</Button>
+```
+
+### Use case 3: resetting a child's state when a prop changes (use `key`)
+
+```tsx
+// Each user gets a fresh form; old typed values don't leak between users
+<EditProfileForm key={user.id} user={user} />
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- `useState(prop)` only uses the prop on the **first** render. Use the prop directly, or reset with `key`.
+- Spreading unknown props onto DOM elements (`{...props}`) can pass invalid attributes. Pick what you need.
+- New object/function props every render (`style={{...}}`, `onClick={() => ...}`) break [React.memo](/fundamentals/react-memo). That's fine unless you're optimizing.
+</Callout>

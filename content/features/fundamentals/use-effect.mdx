@@ -1,0 +1,152 @@
+---
+title: useEffect
+summary: Run side effects after render, with correct dependencies and cleanup, and know when you don't need an effect.
+category: fundamentals
+order: 6
+difficulty: intermediate
+tags: [hooks, useEffect, side-effects, cleanup, fetch]
+technologies: [useEffect, Dependency array, Cleanup function, AbortController]
+updated: 2026-11-08
+---
+
+## What it is
+
+`useEffect` lets a component **synchronize with something outside React**: fetching data, subscriptions, timers, event listeners, `document.title`, third-party widgets.
+
+```tsx
+useEffect(() => {
+  // runs AFTER the render is committed to the screen
+  return () => {
+    // cleanup: runs before the next effect run and on unmount
+  };
+}, [dep1, dep2]); // re-run only when these change
+```
+
+| Dependency array | When the effect runs |
+| --- | --- |
+| *(none)* | After **every** render |
+| `[]` | Once after mount (cleanup on unmount) |
+| `[a, b]` | After mount, then whenever `a` or `b` changes |
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ Missing dependency → uses stale userId forever
+useEffect(() => {
+  fetch(`/api/users/${userId}`).then((r) => r.json()).then(setUser);
+}, []);
+
+// ❌ No cleanup → listener leaks, and stacks up on every re-mount
+useEffect(() => {
+  window.addEventListener("resize", onResize);
+}, []);
+
+// ❌ Effect used to derive state → extra render + can get out of sync
+const [fullName, setFullName] = useState("");
+useEffect(() => {
+  setFullName(`${first} ${last}`);
+}, [first, last]);
+
+// ❌ Object/function created during render as a dependency → runs every render
+const options = { roomId };
+useEffect(() => { connect(options); }, [options]);
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ All used values in deps + abort outdated requests (no race conditions)
+useEffect(() => {
+  const controller = new AbortController();
+  fetch(`/api/users/${userId}`, { signal: controller.signal })
+    .then((r) => r.json())
+    .then(setUser)
+    .catch((e) => e.name !== "AbortError" && setError(e));
+  return () => controller.abort();
+}, [userId]);
+
+// ✅ Always clean up subscriptions, listeners and timers
+useEffect(() => {
+  const onResize = () => setWidth(window.innerWidth);
+  window.addEventListener("resize", onResize);
+  return () => window.removeEventListener("resize", onResize);
+}, []);
+
+// ✅ No effect needed: derive during render
+const fullName = `${first} ${last}`;
+
+// ✅ Depend on primitives; create the object inside the effect
+useEffect(() => {
+  const conn = connect({ roomId });
+  return () => conn.disconnect();
+}, [roomId]);
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why this is correct">
+- **Complete dependencies** keep the effect in sync with the latest props and state (let the `react-hooks/exhaustive-deps` lint rule guide you).
+- **Cleanup** prevents memory leaks, duplicate listeners and state updates after unmount.
+- **AbortController** cancels outdated requests, so a slow old response can't overwrite new data.
+- **Not using an effect** for derived data removes a whole render and a whole class of bugs.
+</Callout>
+
+## How to use
+
+1. Ask first: **do I need an effect?** If you're transforming data for rendering, or responding to a user event, you don't. Compute during render, or do it in the event handler.
+2. Put every reactive value the effect reads in the dependency array.
+3. Return a cleanup for anything you start (listener, interval, subscription, request).
+4. Need the latest value without re-running? Store it in a [ref](/fundamentals/use-ref).
+5. Fetching in many places? Use **React Query / SWR**, or fetch in Next.js Server Components.
+
+## Use-case demos
+
+### Use case 1: interval timer with cleanup
+
+```tsx
+function Countdown({ seconds }: { seconds: number }) {
+  const [left, setLeft] = useState(seconds);
+  useEffect(() => {
+    if (left <= 0) return;
+    const id = setInterval(() => setLeft((s) => s - 1), 1000);
+    return () => clearInterval(id);
+  }, [left > 0]); // only re-subscribe when it starts/stops
+  return <span>{left}s</span>;
+}
+```
+
+### Use case 2: sync with document title / external API
+
+```tsx
+useEffect(() => {
+  document.title = unread ? `(${unread}) Inbox` : "Inbox";
+}, [unread]);
+```
+
+### Use case 3: close a dropdown when clicking outside
+
+```tsx
+function useClickOutside(ref: React.RefObject<HTMLElement>, onOutside: () => void) {
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onOutside();
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [ref, onOutside]);
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- In development, Strict Mode runs effects **mount → cleanup → mount** to expose missing cleanups. Correct code works fine with this.
+- Don't use effects to handle user events ("when the button is clicked, send…"). Do that in the click handler.
+- Don't chain effects that set state that triggers other effects. Compute everything in one place.
+- `async` can't be the effect function itself. Define an async function inside and call it.
+</Callout>

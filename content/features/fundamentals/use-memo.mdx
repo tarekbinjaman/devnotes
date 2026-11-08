@@ -1,0 +1,112 @@
+---
+title: useMemo
+summary: Cache the result of an expensive calculation between renders, recomputing only when inputs change.
+category: fundamentals
+order: 8
+difficulty: intermediate
+tags: [hooks, useMemo, performance, memoization]
+technologies: [useMemo, Dependency array, Referential equality, React Compiler]
+updated: 2026-11-08
+---
+
+## What it is
+
+`useMemo(calculate, deps)` runs `calculate` on the first render, **caches** the result, and returns the cached value on later renders **until a dependency changes**.
+
+```tsx
+const visibleTodos = useMemo(() => filterTodos(todos, tab), [todos, tab]);
+```
+
+It solves two problems:
+1. **Slow calculations** (filtering/sorting thousands of items, heavy math) running on every render.
+2. **Referential stability**: an object/array created during render is "new" every time, which breaks `React.memo` children and effect dependencies.
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard">
+
+```tsx
+function Report({ orders, theme }: { orders: Order[]; theme: string }) {
+  // ❌ Recomputed on every render, even when only `theme` changed
+  const stats = computeStats(orders); // loops 50,000 orders
+
+  // ❌ New object every render → memoized <Chart> re-renders anyway
+  const chartConfig = { data: stats.byMonth, color: theme === "dark" ? "#fff" : "#000" };
+
+  return <Chart config={chartConfig} />;
+}
+```
+
+</Tab>
+<Tab label="Optimized">
+
+```tsx
+function Report({ orders, theme }: { orders: Order[]; theme: string }) {
+  // ✅ Only recomputed when `orders` changes
+  const stats = useMemo(() => computeStats(orders), [orders]);
+
+  // ✅ Same object reference unless its inputs change
+  const chartConfig = useMemo(
+    () => ({ data: stats.byMonth, color: theme === "dark" ? "#fff" : "#000" }),
+    [stats.byMonth, theme],
+  );
+
+  return <Chart config={chartConfig} />; // Chart is wrapped in React.memo
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's faster">
+- The expensive function is **skipped** when dependencies are unchanged (compared with `Object.is`).
+- A **stable reference** lets `React.memo` children and `useEffect` dependencies see "nothing changed".
+- The **React Compiler** (React 19+) can add this memoization automatically. Manual `useMemo` is still useful without it.
+</Callout>
+
+## How to use
+
+1. Measure first: wrap the calculation with `console.time("calc")` / `console.timeEnd("calc")`. Over ~1 ms is worth memoizing.
+2. Put **every** value the calculation reads into the deps array.
+3. Keep the function **pure** (no side effects, no setState).
+4. Use it for stable object/array props passed to a `memo` child or used as effect deps.
+
+## Use-case demos
+
+### Use case 1: sort + filter a big table
+
+```tsx
+const rows = useMemo(() => {
+  const q = query.toLowerCase();
+  return data
+    .filter((r) => r.name.toLowerCase().includes(q))
+    .sort((a, b) => (sortDir === "asc" ? a[sortKey] - b[sortKey] : b[sortKey] - a[sortKey]));
+}, [data, query, sortKey, sortDir]);
+```
+
+### Use case 2: stable Context value (prevents all consumers re-rendering)
+
+```tsx
+function CartProvider({ children }: { children: React.ReactNode }) {
+  const [items, setItems] = useState<Item[]>([]);
+  const value = useMemo(() => ({ items, setItems }), [items]);
+  return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
+}
+```
+
+### Use case 3: build a lookup map once
+
+```tsx
+const productsById = useMemo(() => new Map(products.map((p) => [p.id, p])), [products]);
+const product = productsById.get(selectedId); // O(1) instead of .find() every render
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- Don't wrap cheap things (`a + b`, `items.length`). Memoization has its own cost.
+- `useMemo` is a performance hint, not a guarantee. React may discard the cache, so your code must still be correct without it.
+- Dependencies that are new every render (inline objects) make `useMemo` useless.
+- For caching **functions**, use [useCallback](/fundamentals/use-callback).
+</Callout>

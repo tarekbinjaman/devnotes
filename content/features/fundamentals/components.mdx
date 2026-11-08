@@ -1,0 +1,163 @@
+---
+title: Components
+summary: How React apps are built from small, reusable functions that return UI, and how they communicate.
+category: fundamentals
+order: 1
+difficulty: beginner
+tags: [components, jsx, composition, basics]
+technologies: [JSX, Function components, children, Composition]
+updated: 2026-11-08
+---
+
+## What it is
+
+A **component** is a JavaScript function that returns UI (JSX). A React app is a **tree** of components: `App` renders `Header`, `ProductList` and `Footer`, and `ProductList` renders many `ProductCard`s. Each component owns one piece of the screen.
+
+Rules:
+- Names start with a **capital letter** (`ProductCard`, not `productCard`), so React can tell them apart from HTML tags.
+- They return **one root element** (wrap siblings in `<>...</>`).
+- They should be **pure**: the same props and state always give the same UI, with no side effects while rendering.
+
+## How components communicate
+
+| Direction | How |
+| --- | --- |
+| Parent → child | **Props** (see [Props](/fundamentals/props)) |
+| Child → parent | Parent passes a **callback function** as a prop and the child calls it |
+| Siblings | **Lift state up** to the nearest common parent |
+| Far apart in the tree | **Context** (see [Context API](/fundamentals/context-api)) or a store |
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ One giant component: hard to read, reuse and test
+export default function ProductPage() {
+  const [cart, setCart] = useState<Product[]>([]);
+  return (
+    <div>
+      <header>
+        <h1>Shop</h1>
+        <span>{cart.length} items</span>
+      </header>
+      {products.map((p) => (
+        <div key={p.id} className="card">
+          <img src={p.image} />
+          <h3>{p.name}</h3>
+          <p>${p.price}</p>
+          <button onClick={() => setCart([...cart, p])}>Add</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ❌ Defining a component INSIDE another component:
+// it's re-created every render, so its state resets every time
+function Parent() {
+  function Child() { const [v, setV] = useState(""); return <input value={v} onChange={(e) => setV(e.target.value)} />; }
+  return <Child />;
+}
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ Small components, each with one job, defined at the top level of the file
+
+function Header({ cartCount }: { cartCount: number }) {
+  return (
+    <header className="flex justify-between">
+      <h1>Shop</h1>
+      <span>{cartCount} items</span>
+    </header>
+  );
+}
+
+function ProductCard({ product, onAdd }: { product: Product; onAdd: (p: Product) => void }) {
+  return (
+    <div className="card">
+      <img src={product.image} alt={product.name} />
+      <h3>{product.name}</h3>
+      <p>${product.price}</p>
+      {/* child → parent: call the callback prop */}
+      <button onClick={() => onAdd(product)}>Add</button>
+    </div>
+  );
+}
+
+export default function ProductPage() {
+  const [cart, setCart] = useState<Product[]>([]); // state lives in the common parent
+  const add = (p: Product) => setCart((c) => [...c, p]);
+  return (
+    <>
+      <Header cartCount={cart.length} />
+      {products.map((p) => (
+        <ProductCard key={p.id} product={p} onAdd={add} />
+      ))}
+    </>
+  );
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why split components">
+- **Reuse**: `ProductCard` can be used on the home page, search page and wishlist.
+- **Re-render scope**: state placed low in the tree re-renders less of the page.
+- **Readability and testing**: each file does one thing.
+- Defining components at **top level** keeps their identity stable, so their state is preserved.
+</Callout>
+
+## How to use
+
+1. When a piece of JSX repeats, or a component grows past ~100–150 lines, extract a component.
+2. Give it props for the data it needs and callbacks for the events it reports.
+3. Keep state in the **lowest common parent** of the components that need it.
+4. Use `children` for wrapper components (cards, modals, layouts).
+
+## Use-case demos
+
+### Use case 1: composition with `children` (layout/wrapper components)
+
+```tsx
+function Card({ title, children, footer }: { title: string; children: React.ReactNode; footer?: React.ReactNode }) {
+  return (
+    <section className="rounded-xl border p-4">
+      <h2 className="font-semibold">{title}</h2>
+      <div className="mt-2">{children}</div>
+      {footer && <div className="mt-4 border-t pt-3">{footer}</div>}
+    </section>
+  );
+}
+
+<Card title="Billing" footer={<button>Save</button>}>
+  <BillingForm />
+</Card>
+```
+
+### Use case 2: siblings sharing data by lifting state up
+
+```tsx
+function SearchPage() {
+  const [query, setQuery] = useState(""); // shared by both children
+  return (
+    <>
+      <SearchBox value={query} onChange={setQuery} />
+      <Results query={query} />
+    </>
+  );
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- Don't split too early. A 3-line component used once is just indirection.
+- Never define a component inside another component's body.
+- Don't mutate props or variables outside the component while rendering. Rendering must be pure.
+</Callout>

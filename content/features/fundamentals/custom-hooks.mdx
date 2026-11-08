@@ -1,0 +1,167 @@
+---
+title: Custom Hooks
+summary: Extract reusable stateful logic into your own useSomething functions.
+category: fundamentals
+order: 13
+difficulty: intermediate
+tags: [hooks, custom-hooks, reuse, patterns]
+technologies: [Custom hooks, useState, useEffect, useCallback, TypeScript generics]
+updated: 2026-11-08
+---
+
+## What it is
+
+A **custom hook** is a function whose name starts with `use` and that calls other hooks. It lets you **reuse logic** (fetching, form handling, media queries, local storage) across components, the same way components let you reuse UI.
+
+- Each component that calls the hook gets its **own independent state**. Hooks share *logic*, not *data*.
+- The **Rules of Hooks** apply: call hooks only at the top level (not in loops/conditions), and only from components or other hooks.
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard (duplicated logic)">
+
+```tsx
+// ❌ Same fetch/loading/error logic copy-pasted into every component
+function UserProfile({ id }: { id: string }) {
+  const [data, setData] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  useEffect(() => {
+    setLoading(true);
+    fetch(`/api/users/${id}`).then((r) => r.json()).then(setData).catch(setError).finally(() => setLoading(false));
+  }, [id]);
+  // …
+}
+
+function OrderList() {
+  const [data, setData] = useState<Order[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  useEffect(() => { /* same thing again, slightly different, no abort */ }, []);
+  // …
+}
+```
+
+</Tab>
+<Tab label="With a custom hook">
+
+```tsx
+// hooks/useFetch.ts
+export function useFetch<T>(url: string | null) {
+  const [state, setState] = useState<{ data: T | null; loading: boolean; error: Error | null }>({
+    data: null,
+    loading: !!url,
+    error: null,
+  });
+
+  useEffect(() => {
+    if (!url) return;
+    const controller = new AbortController();
+    setState((s) => ({ ...s, loading: true, error: null }));
+    fetch(url, { signal: controller.signal })
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<T>;
+      })
+      .then((data) => setState({ data, loading: false, error: null }))
+      .catch((error) => {
+        if (error.name !== "AbortError") setState({ data: null, loading: false, error });
+      });
+    return () => controller.abort();
+  }, [url]);
+
+  return state;
+}
+
+// ✅ Components become short and focused on UI
+function UserProfile({ id }: { id: string }) {
+  const { data: user, loading, error } = useFetch<User>(`/api/users/${id}`);
+  if (loading) return <Spinner />;
+  if (error) return <ErrorMessage error={error} />;
+  return <h1>{user!.name}</h1>;
+}
+
+function OrderList() {
+  const { data: orders } = useFetch<Order[]>("/api/orders");
+  // …
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's better">
+- **Write once, fix once**: a bug fix (like adding `AbortController`) applies everywhere.
+- **Components read like a description of the UI**, with no plumbing.
+- **Testable in isolation** with `renderHook` from Testing Library.
+- **Typed with generics**, so each caller gets the right data type.
+</Callout>
+
+## How to use
+
+1. Spot repeated hook logic (the same `useState` + `useEffect` combo in 2+ places).
+2. Move it into `hooks/useThing.ts`. The name **must** start with `use`.
+3. Take inputs as parameters, and return what components need (value, setters, status) as an object or tuple.
+4. Wrap returned functions in `useCallback` so consumers get stable references.
+5. Keep hooks focused. Compose small hooks (`useDebounce` + `useFetch`) rather than one giant hook.
+
+## Use-case demos
+
+### Use case 1: `useMediaQuery` (responsive logic in JS)
+
+```tsx
+export function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(false);
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const on = () => setMatches(mql.matches);
+    on();
+    mql.addEventListener("change", on);
+    return () => mql.removeEventListener("change", on);
+  }, [query]);
+  return matches;
+}
+
+// const isMobile = useMediaQuery("(max-width: 640px)");
+```
+
+### Use case 2: `useForm` with validation
+
+```tsx
+export function useForm<T extends Record<string, string>>(initial: T, validate: (v: T) => Partial<Record<keyof T, string>>) {
+  const [values, setValues] = useState(initial);
+  const [touched, setTouched] = useState<Partial<Record<keyof T, boolean>>>({});
+  const errors = validate(values); // derived, never stale
+
+  const register = (name: keyof T) => ({
+    name,
+    value: values[name],
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => setValues((v) => ({ ...v, [name]: e.target.value })),
+    onBlur: () => setTouched((t) => ({ ...t, [name]: true })),
+  });
+
+  return { values, errors, touched, register, isValid: Object.keys(errors).length === 0 };
+}
+
+// const { register, errors, touched, isValid } = useForm({ email: "" }, (v) => (v.email.includes("@") ? {} : { email: "Invalid email" }));
+// <input {...register("email")} />  {touched.email && errors.email}
+```
+
+### Use case 3: composing hooks (debounced search)
+
+```tsx
+function useSearch(query: string) {
+  const debounced = useDebounce(query.trim(), 300);
+  return useFetch<Result[]>(debounced ? `/api/search?q=${encodeURIComponent(debounced)}` : null);
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- A function that doesn't call any hooks shouldn't be named `use…`. Make it a normal utility.
+- Hooks don't share state between components. For shared data, use [Context](/fundamentals/context-api) or a store.
+- Never call hooks conditionally (`if (x) useFetch(…)`). Pass `null` to skip instead, like `useFetch(null)` above.
+- For production data fetching, React Query/SWR are battle-tested `useFetch` replacements with caching.
+</Callout>

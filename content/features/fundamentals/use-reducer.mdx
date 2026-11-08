@@ -1,0 +1,164 @@
+---
+title: useReducer
+summary: Manage complex state with explicit actions and a pure reducer function instead of many setState calls.
+category: fundamentals
+order: 11
+difficulty: intermediate
+tags: [hooks, useReducer, state-management, typescript]
+technologies: [useReducer, Reducer pattern, Discriminated unions, dispatch]
+updated: 2026-11-08
+---
+
+## What it is
+
+`useReducer` is an alternative to `useState` for state with **many related fields** or **many ways to change**. You describe *what happened* (`dispatch({ type: "added", item })`), and a **reducer** function decides *how the state changes*.
+
+```tsx
+const [state, dispatch] = useReducer(reducer, initialState);
+
+function reducer(state: State, action: Action): State {
+  // pure: return a NEW state, never mutate
+}
+```
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard (many useState)">
+
+```tsx
+// ❌ 5 pieces of state that must change together: easy to forget one
+function Checkout() {
+  const [items, setItems] = useState<Item[]>([]);
+  const [coupon, setCoupon] = useState<string | null>(null);
+  const [status, setStatus] = useState<"idle" | "paying" | "done" | "error">("idle");
+  const [error, setError] = useState<string | null>(null);
+  const [orderId, setOrderId] = useState<string | null>(null);
+
+  async function pay() {
+    setStatus("paying");
+    setError(null);
+    try {
+      const id = await api.pay(items, coupon);
+      setOrderId(id);
+      setStatus("done");
+      setItems([]);           // forgot setCoupon(null)?
+    } catch (e) {
+      setStatus("error");
+      setError(String(e));
+    }
+  }
+}
+```
+
+</Tab>
+<Tab label="With useReducer">
+
+```tsx
+type State = {
+  items: Item[];
+  coupon: string | null;
+  status: "idle" | "paying" | "done" | "error";
+  error: string | null;
+  orderId: string | null;
+};
+
+type Action =
+  | { type: "item_added"; item: Item }
+  | { type: "item_removed"; id: string }
+  | { type: "coupon_applied"; code: string }
+  | { type: "pay_started" }
+  | { type: "pay_succeeded"; orderId: string }
+  | { type: "pay_failed"; error: string };
+
+const initialState: State = { items: [], coupon: null, status: "idle", error: null, orderId: null };
+
+function checkoutReducer(state: State, action: Action): State {
+  switch (action.type) {
+    case "item_added":
+      return { ...state, items: [...state.items, action.item] };
+    case "item_removed":
+      return { ...state, items: state.items.filter((i) => i.id !== action.id) };
+    case "coupon_applied":
+      return { ...state, coupon: action.code };
+    case "pay_started":
+      return { ...state, status: "paying", error: null };
+    case "pay_succeeded":
+      // ✅ every related field updated in ONE place
+      return { ...initialState, status: "done", orderId: action.orderId };
+    case "pay_failed":
+      return { ...state, status: "error", error: action.error };
+  }
+}
+
+function Checkout() {
+  const [state, dispatch] = useReducer(checkoutReducer, initialState);
+
+  async function pay() {
+    dispatch({ type: "pay_started" });
+    try {
+      dispatch({ type: "pay_succeeded", orderId: await api.pay(state.items, state.coupon) });
+    } catch (e) {
+      dispatch({ type: "pay_failed", error: String(e) });
+    }
+  }
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's better">
+- **All transitions in one pure function**: easy to read, impossible to "half update".
+- **TypeScript discriminated unions** make TS check every action's payload.
+- **Testable without React**: `expect(checkoutReducer(s, action)).toEqual(…)`.
+- `dispatch` is **always stable**, so it's safe to pass down or put in Context without `useCallback`.
+</Callout>
+
+## How to use
+
+1. Use it when several state values change together, or the next state depends on the previous in complex ways.
+2. Name actions as **events** (`item_added`, `pay_failed`), not setters (`setItems`).
+3. Keep the reducer **pure**: no API calls, no `Date.now()`, no mutations. Do side effects in handlers/effects, then dispatch.
+4. Combine with [Context](/fundamentals/context-api) to share `state` + `dispatch` across a feature.
+
+## Use-case demos
+
+### Use case 1: reducer unit test
+
+```ts
+import { expect, test } from "vitest";
+
+test("pay_succeeded clears the cart and stores the order id", () => {
+  const s = { ...initialState, items: [item], coupon: "SAVE10", status: "paying" as const };
+  const next = checkoutReducer(s, { type: "pay_succeeded", orderId: "o_1" });
+  expect(next).toEqual({ ...initialState, status: "done", orderId: "o_1" });
+});
+```
+
+### Use case 2: multi-step form wizard
+
+```tsx
+type WizardState = { step: 1 | 2 | 3; data: Partial<SignupData> };
+type WizardAction =
+  | { type: "next"; patch: Partial<SignupData> }
+  | { type: "back" }
+  | { type: "reset" };
+
+function wizard(s: WizardState, a: WizardAction): WizardState {
+  switch (a.type) {
+    case "next": return { step: Math.min(s.step + 1, 3) as WizardState["step"], data: { ...s.data, ...a.patch } };
+    case "back": return { ...s, step: Math.max(s.step - 1, 1) as WizardState["step"] };
+    case "reset": return { step: 1, data: {} };
+  }
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- For one or two independent values, `useState` is simpler.
+- Mutating `state` inside the reducer (`state.items.push`) breaks re-rendering. Always return new objects.
+- Side effects inside a reducer run twice in Strict Mode. Keep them out.
+- App-wide complex state with many consumers may be better in **Zustand** or **Redux Toolkit**.
+</Callout>

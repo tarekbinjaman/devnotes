@@ -21,8 +21,8 @@ npm run dev      # http://localhost:3000
 
 1. Copy `templates/feature-template.mdx`
 2. Paste it into `content/features/<category>/<your-feature-slug>.mdx`
-   (categories: `react`, `javascript`, `css`, `backend`)
-3. Fill in the frontmatter (title, summary, tags, technologies, difficulty) and the sections
+   (categories: `fundamentals`, `react`, `javascript`, `css`, `backend`)
+3. Fill in the frontmatter (title, summary, tags, technologies, difficulty, optional `order`) and the sections
 4. Save. It appears automatically on the home page, in search, in the sidebar and on its category page.
 
 ### Components you can use inside `.mdx`

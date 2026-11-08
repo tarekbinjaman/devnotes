@@ -1,0 +1,135 @@
+---
+title: useCallback
+summary: Keep the same function reference between renders so memoized children and effects don't re-run.
+category: fundamentals
+order: 9
+difficulty: intermediate
+tags: [hooks, useCallback, performance, memoization]
+technologies: [useCallback, React.memo, Referential equality]
+updated: 2026-11-08
+---
+
+## What it is
+
+Every render creates **new function objects**. `() => {}` from render 1 is not `===` to `() => {}` from render 2. Usually that's fine. It matters when the function is:
+- passed to a child wrapped in [`React.memo`](/fundamentals/react-memo) (a new function looks like a changed prop)
+- used in a `useEffect` / `useMemo` dependency array
+- returned from a custom hook that others depend on
+
+`useCallback(fn, deps)` returns the **same function** until a dependency changes.
+
+```tsx
+const handleSelect = useCallback((id: string) => setSelected(id), []);
+// same as: useMemo(() => (id: string) => setSelected(id), [])
+```
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard">
+
+```tsx
+const Row = memo(function Row({ item, onDelete }: { item: Item; onDelete: (id: string) => void }) {
+  return <li>{item.name} <button onClick={() => onDelete(item.id)}>×</button></li>;
+});
+
+function List({ items }: { items: Item[] }) {
+  const [list, setList] = useState(items);
+  const [filter, setFilter] = useState("");
+
+  // ❌ New function every render → ALL memoized rows re-render on every keystroke
+  const handleDelete = (id: string) => setList(list.filter((i) => i.id !== id));
+
+  return (
+    <>
+      <input value={filter} onChange={(e) => setFilter(e.target.value)} />
+      <ul>{list.map((i) => <Row key={i.id} item={i} onDelete={handleDelete} />)}</ul>
+    </>
+  );
+}
+```
+
+</Tab>
+<Tab label="Optimized">
+
+```tsx
+function List({ items }: { items: Item[] }) {
+  const [list, setList] = useState(items);
+  const [filter, setFilter] = useState("");
+
+  // ✅ Stable reference; functional update means no dependency on `list`
+  const handleDelete = useCallback((id: string) => {
+    setList((prev) => prev.filter((i) => i.id !== id));
+  }, []);
+
+  return (
+    <>
+      <input value={filter} onChange={(e) => setFilter(e.target.value)} />
+      {/* ✅ Rows skip re-rendering while typing */}
+      <ul>{list.map((i) => <Row key={i.id} item={i} onDelete={handleDelete} />)}</ul>
+    </>
+  );
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's faster">
+- `React.memo` compares props with `===`. A stable callback makes it see "unchanged", so the child is skipped.
+- **Functional updates** (`setList(prev => …)`) let you drop state from the deps, keeping the callback stable for longer.
+- `useCallback` **on its own** doesn't make anything faster. It only helps together with `memo`, or with effect/memo dependencies.
+</Callout>
+
+## How to use
+
+1. Use it when passing a function to a **`memo` child**, or when the function is a **dependency** of an effect/memo/another callback.
+2. List every value the function reads in deps, or use functional updates to avoid them.
+3. In custom hooks, wrap returned functions with `useCallback` so consumers get stable references.
+4. With the React Compiler enabled, you can usually skip manual `useCallback`.
+
+## Use-case demos
+
+### Use case 1: function used inside an effect
+
+```tsx
+const fetchResults = useCallback(async () => {
+  const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&page=${page}`);
+  setResults(await res.json());
+}, [query, page]);
+
+useEffect(() => {
+  fetchResults();
+}, [fetchResults]); // re-runs only when query or page changes
+```
+
+### Use case 2: custom hook returning stable actions
+
+```tsx
+function useToggle(initial = false) {
+  const [on, setOn] = useState(initial);
+  const toggle = useCallback(() => setOn((v) => !v), []);
+  const setTrue = useCallback(() => setOn(true), []);
+  const setFalse = useCallback(() => setOn(false), []);
+  return { on, toggle, setTrue, setFalse };
+}
+```
+
+### Use case 3: always-latest callback without changing identity
+
+```tsx
+// Stable function that always calls the newest `fn` (e.g. for event listeners)
+function useEvent<A extends unknown[], R>(fn: (...a: A) => R) {
+  const ref = useRef(fn);
+  useLayoutEffect(() => { ref.current = fn; });
+  return useCallback((...a: A) => ref.current(...a), []);
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- Wrapping every handler in `useCallback` adds noise and work with no gain if the child isn't memoized.
+- Missing deps give **stale closures**: the function sees old state. Trust the exhaustive-deps lint rule.
+- `onClick={() => handle(id)}` inside the memo child itself is fine. Stability matters for **props crossing into** memoized components.
+</Callout>

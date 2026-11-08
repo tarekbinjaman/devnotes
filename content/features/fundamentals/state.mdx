@@ -1,0 +1,145 @@
+---
+title: State
+summary: How React remembers data between renders and updates the screen when it changes.
+category: fundamentals
+order: 3
+difficulty: beginner
+tags: [state, useState, immutability, basics]
+technologies: [useState, Functional updates, Immutability, Lazy initial state]
+updated: 2026-11-08
+---
+
+## What it is
+
+**State** is a component's memory: data that changes over time (input text, open/closed, cart items). When you call the setter, React **re-renders** the component with the new value.
+
+```tsx
+const [count, setCount] = useState(0);
+//      value   setter        initial value
+```
+
+Key facts:
+- A normal variable (`let count = 0`) resets every render and changing it doesn't update the screen. State survives renders.
+- Updates are **scheduled**, not instant. `count` keeps its old value until the next render.
+- React compares old and new with `Object.is`. **Mutating** an object or array keeps the same reference, so React may not re-render.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ Mutating state: same reference → React may not re-render
+const [todos, setTodos] = useState<Todo[]>([]);
+function add(text: string) {
+  todos.push({ id: Date.now(), text, done: false });
+  setTodos(todos);
+}
+
+// ❌ Using stale value: clicking once adds 1, not 3
+function addThree() {
+  setCount(count + 1);
+  setCount(count + 1);
+  setCount(count + 1);
+}
+
+// ❌ Redundant state that can get out of sync
+const [items, setItems] = useState<Item[]>([]);
+const [total, setTotal] = useState(0); // must remember to update on every change
+
+// ❌ Expensive initial value computed on EVERY render
+const [data] = useState(JSON.parse(localStorage.getItem("data") ?? "[]"));
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ Create new arrays/objects instead of mutating
+function add(text: string) {
+  setTodos((prev) => [...prev, { id: crypto.randomUUID(), text, done: false }]);
+}
+function toggle(id: string) {
+  setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, done: !t.done } : t)));
+}
+function remove(id: string) {
+  setTodos((prev) => prev.filter((t) => t.id !== id));
+}
+
+// ✅ Functional update: each one uses the latest value → adds 3
+function addThree() {
+  setCount((c) => c + 1);
+  setCount((c) => c + 1);
+  setCount((c) => c + 1);
+}
+
+// ✅ Derive instead of storing
+const total = items.reduce((sum, i) => sum + i.price * i.qty, 0);
+
+// ✅ Lazy initializer: the function only runs on the first render
+const [data] = useState(() => JSON.parse(localStorage.getItem("data") ?? "[]"));
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why this matters">
+- **Immutable updates** give React a new reference, so it knows something changed (and it enables `memo`, undo history and more).
+- **Functional updates** `setX(prev => …)` always use the latest value, which is safe with batching and async code.
+- **Derived values** can never get out of sync.
+- **Lazy initial state** avoids repeating expensive work on every render.
+</Callout>
+
+## How to use
+
+1. Ask "does this change over time, and does the UI depend on it?" If yes, it's state. Otherwise use a constant, a prop or a derived value.
+2. Keep state **minimal**: store the source of truth and compute the rest.
+3. Use `setX(prev => …)` whenever the new value depends on the old one.
+4. Update nested objects with spreads: `setUser(u => ({ ...u, address: { ...u.address, city } }))`.
+5. Many related fields with complex transitions? Use [useReducer](/fundamentals/use-reducer).
+
+## Use-case demos
+
+### Use case 1: form object state with one handler
+
+```tsx
+const [form, setForm] = useState({ name: "", email: "", plan: "free" });
+
+function onChange(e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) {
+  const { name, value } = e.target;
+  setForm((f) => ({ ...f, [name]: value }));
+}
+
+<input name="name" value={form.name} onChange={onChange} />
+<input name="email" value={form.email} onChange={onChange} />
+<select name="plan" value={form.plan} onChange={onChange}>…</select>
+```
+
+### Use case 2: store the selected ID, not the selected object
+
+```tsx
+// ✅ If items update, the selection still points at the fresh item
+const [selectedId, setSelectedId] = useState<string | null>(null);
+const selected = items.find((i) => i.id === selectedId) ?? null;
+```
+
+### Use case 3: state that persists to localStorage
+
+```tsx
+function useLocalStorage<T>(key: string, initial: T) {
+  const [value, setValue] = useState<T>(() => {
+    try { return JSON.parse(localStorage.getItem(key) ?? "") as T; } catch { return initial; }
+  });
+  useEffect(() => { localStorage.setItem(key, JSON.stringify(value)); }, [key, value]);
+  return [value, setValue] as const;
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- `console.log(count)` right after `setCount` prints the **old** value. That's expected.
+- Don't store values you can compute (filtered lists, totals, full name).
+- Don't store things that don't affect the UI (timer ids, previous values). Use [useRef](/fundamentals/use-ref).
+- Server data (API results) is usually better in React Query/SWR than in `useState` + `useEffect`.
+</Callout>

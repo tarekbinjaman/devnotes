@@ -1,0 +1,156 @@
+---
+title: Context API
+summary: Share state across many components without passing props through every level.
+category: fundamentals
+order: 12
+difficulty: intermediate
+tags: [context, state-management, prop-drilling, theme, auth]
+technologies: [createContext, useContext, Provider, useMemo]
+updated: 2026-11-08
+---
+
+## What it is
+
+**Context** lets a parent make a value available to **any component below it**, however deep, without passing props through every level ("prop drilling").
+
+```tsx
+const ThemeContext = createContext<"light" | "dark">("light"); // 1. create
+<ThemeContext.Provider value="dark">…</ThemeContext.Provider>   // 2. provide
+const theme = useContext(ThemeContext);                          // 3. consume
+```
+
+Good fits: **theme, current user/auth, locale, feature flags, a feature's shared state** (cart, form wizard).
+
+<Callout type="info" title="Important">
+Every component that calls `useContext(X)` re-renders when X's `value` changes. Context is a **transport** mechanism, not an optimized state store.
+</Callout>
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ Prop drilling: Layout and Sidebar don't use `user`, they just pass it on
+<App user={user}>
+  <Layout user={user}>
+    <Sidebar user={user}>
+      <UserMenu user={user} />
+
+// ❌ New value object every render → EVERY consumer re-renders on every App render
+function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
+  return (
+    <AuthContext.Provider value={{ user, login: (u: User) => setUser(u), logout: () => setUser(null) }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+// ❌ One giant context for everything: changing the theme re-renders cart consumers
+<AppContext.Provider value={{ user, theme, cart, locale, notifications }} />
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ Typed context + memoized value + safe custom hook
+type AuthCtx = { user: User | null; login: (u: User) => void; logout: () => void };
+const AuthContext = createContext<AuthCtx | null>(null);
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
+  const login = useCallback((u: User) => setUser(u), []);
+  const logout = useCallback(() => setUser(null), []);
+  const value = useMemo(() => ({ user, login, logout }), [user, login, logout]); // ✅ stable
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+export function useAuth() {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error("useAuth must be used inside <AuthProvider>"); // ✅ clear error
+  return ctx;
+}
+
+// Anywhere below:
+function UserMenu() {
+  const { user, logout } = useAuth();
+  return user ? <button onClick={logout}>Log out {user.name}</button> : <a href="/login">Log in</a>;
+}
+
+// ✅ Separate contexts for unrelated data
+<AuthProvider><ThemeProvider><CartProvider>{children}</CartProvider></ThemeProvider></AuthProvider>
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why this is better">
+- **No prop drilling**: intermediate components stay clean.
+- **`useMemo` on the value** means consumers only re-render when the data actually changes.
+- **Split contexts**: a theme change doesn't re-render cart components.
+- **A custom hook with a null check** gives autocomplete and a clear error if the Provider is missing.
+</Callout>
+
+## How to use
+
+1. `createContext<Type | null>(null)` in its own file (`context/auth.tsx`).
+2. Write a `Provider` component that holds the state and memoizes the value.
+3. Export a `useX()` hook that throws if used outside the Provider.
+4. Wrap the part of the tree that needs it. In Next.js App Router, providers must be **Client Components** (`"use client"`), placed in a `providers.tsx` used by `layout.tsx`.
+5. For frequently changing data used by many components, consider splitting **state** and **dispatch** contexts, or use Zustand.
+
+## Use-case demos
+
+### Use case 1: theme with Next.js App Router
+
+```tsx
+// app/providers.tsx
+"use client";
+import { createContext, useContext, useMemo, useState } from "react";
+
+type Theme = "light" | "dark";
+const ThemeCtx = createContext<{ theme: Theme; toggle: () => void } | null>(null);
+
+export function Providers({ children }: { children: React.ReactNode }) {
+  const [theme, setTheme] = useState<Theme>("light");
+  const value = useMemo(() => ({ theme, toggle: () => setTheme((t) => (t === "light" ? "dark" : "light")) }), [theme]);
+  return (
+    <ThemeCtx.Provider value={value}>
+      <div className={theme}>{children}</div>
+    </ThemeCtx.Provider>
+  );
+}
+export const useTheme = () => useContext(ThemeCtx)!;
+
+// app/layout.tsx →  <body><Providers>{children}</Providers></body>
+```
+
+### Use case 2: context + useReducer (split state and dispatch)
+
+```tsx
+const CartStateCtx = createContext<CartState | null>(null);
+const CartDispatchCtx = createContext<React.Dispatch<CartAction> | null>(null);
+
+export function CartProvider({ children }: { children: React.ReactNode }) {
+  const [state, dispatch] = useReducer(cartReducer, { items: [] });
+  return (
+    <CartDispatchCtx.Provider value={dispatch}>   {/* dispatch never changes */}
+      <CartStateCtx.Provider value={state}>{children}</CartStateCtx.Provider>
+    </CartDispatchCtx.Provider>
+  );
+}
+
+// "Add to cart" buttons only use dispatch, so they DON'T re-render when the cart changes
+export const useCartDispatch = () => useContext(CartDispatchCtx)!;
+export const useCart = () => useContext(CartStateCtx)!;
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- Don't use context just to avoid passing props 1–2 levels. Props are clearer.
+- High-frequency values (mouse position, input text) in context re-render every consumer. Keep them local or use a store with selectors (Zustand).
+- React 19 lets you write `<ThemeCtx value={…}>` instead of `<ThemeCtx.Provider value={…}>`.
+</Callout>

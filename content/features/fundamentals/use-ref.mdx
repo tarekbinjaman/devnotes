@@ -1,0 +1,154 @@
+---
+title: useRef
+summary: Keep a mutable value or a DOM element reference across renders without triggering re-renders.
+category: fundamentals
+order: 7
+difficulty: beginner
+tags: [hooks, useRef, dom, refs]
+technologies: [useRef, DOM refs, forwardRef, ref as prop]
+updated: 2026-11-08
+---
+
+## What it is
+
+`useRef` returns an object `{ current: value }` that **stays the same across renders**. Changing `ref.current` does **not** re-render the component.
+
+Two main uses:
+1. **Access a DOM element**: focus an input, measure size, scroll into view, integrate a non-React library.
+2. **Remember a value** that the UI doesn't display: timer ids, previous values, "is mounted", the latest callback.
+
+| | `useState` | `useRef` |
+| --- | --- | --- |
+| Survives re-renders | ✅ | ✅ |
+| Changing it re-renders | ✅ | ❌ |
+| Read it during render | ✅ | ❌ (avoid) |
+| Good for | data shown in UI | DOM nodes, timers, instance values |
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ document.querySelector in React: fragile, breaks with multiple instances
+function Search() {
+  useEffect(() => {
+    (document.querySelector("#search") as HTMLInputElement).focus();
+  }, []);
+  return <input id="search" />;
+}
+
+// ❌ Timer id in a normal variable: lost on re-render, so you can't clear it
+function Stopwatch() {
+  let intervalId: number;
+  const start = () => { intervalId = window.setInterval(tick, 1000); };
+  const stop = () => clearInterval(intervalId); // undefined after a re-render
+}
+
+// ❌ Using a ref for UI data: screen doesn't update
+const count = useRef(0);
+<button onClick={() => count.current++}>{count.current}</button>
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ DOM ref
+function Search() {
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => inputRef.current?.focus(), []);
+  return <input ref={inputRef} />;
+}
+
+// ✅ Mutable instance value that survives renders
+function Stopwatch() {
+  const [ms, setMs] = useState(0);
+  const intervalRef = useRef<number | null>(null);
+
+  const start = () => {
+    if (intervalRef.current) return;
+    intervalRef.current = window.setInterval(() => setMs((m) => m + 100), 100);
+  };
+  const stop = () => {
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    intervalRef.current = null;
+  };
+  useEffect(() => stop, []); // clear on unmount
+
+  return <>{(ms / 1000).toFixed(1)}s <button onClick={start}>Start</button><button onClick={stop}>Stop</button></>;
+}
+
+// ✅ UI data belongs in state
+const [count, setCount] = useState(0);
+<button onClick={() => setCount((c) => c + 1)}>{count}</button>
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why use a ref">
+- Refs give you a **direct, instance-safe** handle to DOM nodes, so there are no global selectors.
+- Updating a ref costs **zero re-renders**. That's ideal for values that change often but aren't displayed.
+- Refs keep their value across renders, unlike plain variables.
+</Callout>
+
+## How to use
+
+1. `const ref = useRef<HTMLDivElement>(null)` and attach it with `<div ref={ref}>`.
+2. Use `ref.current` in **effects and event handlers**, not during render.
+3. Pass refs to your own components: in **React 19** `ref` is a normal prop. In React 18, wrap the component with `forwardRef`.
+4. If changing the value should update the screen, use state instead.
+
+## Use-case demos
+
+### Use case 1: scroll to the newest chat message
+
+```tsx
+function ChatLog({ messages }: { messages: Message[] }) {
+  const endRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
+  return (
+    <div className="h-96 overflow-y-auto">
+      {messages.map((m) => <p key={m.id}>{m.text}</p>)}
+      <div ref={endRef} />
+    </div>
+  );
+}
+```
+
+### Use case 2: remember the previous value
+
+```tsx
+function usePrevious<T>(value: T) {
+  const ref = useRef<T>();
+  useEffect(() => { ref.current = value; }, [value]);
+  return ref.current; // value from the previous render
+}
+
+const prevPrice = usePrevious(price);
+// show ▲ or ▼ when price changes
+```
+
+### Use case 3: custom input that accepts a ref (React 19)
+
+```tsx
+function TextInput({ ref, ...props }: React.ComponentProps<"input">) {
+  return <input ref={ref} className="rounded border px-3 py-2" {...props} />;
+}
+
+// React 18 version:
+const TextInput18 = forwardRef<HTMLInputElement, React.ComponentProps<"input">>((props, ref) => (
+  <input ref={ref} className="rounded border px-3 py-2" {...props} />
+));
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- `ref.current` is `null` during the first render. DOM refs are set after commit.
+- Don't read or write refs during render (except lazy init). It makes the output unpredictable.
+- Refs aren't a way to avoid "too many re-renders". If the UI shows it, it's state.
+</Callout>

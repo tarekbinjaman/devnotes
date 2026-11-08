@@ -1,0 +1,133 @@
+---
+title: React.memo
+summary: Skip re-rendering a child component when its props haven't changed.
+category: fundamentals
+order: 10
+difficulty: intermediate
+tags: [memo, performance, re-render, memoization]
+technologies: [React.memo, Shallow comparison, useCallback, useMemo]
+updated: 2026-11-08
+---
+
+## What it is
+
+By default, when a parent re-renders, **all its children re-render**, even if their props are identical. `memo(Component)` makes React **compare the new props with the previous props** (shallowly, with `Object.is` for each prop). If they're all the same, React reuses the last result and skips the child.
+
+```tsx
+const ProductCard = memo(function ProductCard({ product }: { product: Product }) {
+  return <div>{product.name}</div>;
+});
+```
+
+It **avoids some** re-renders, not all: a memoized component still re-renders when **its own state** or **a context it uses** changes.
+
+## Standard vs optimized
+
+<CodeTabs>
+<Tab label="Standard">
+
+```tsx
+function ProductGrid({ products }: { products: Product[] }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  return (
+    <>
+      <Clock time={now} />
+      {/* ❌ All 500 cards re-render every second because of the clock */}
+      {products.map((p) => <ProductCard key={p.id} product={p} />)}
+    </>
+  );
+}
+
+function ProductCard({ product }: { product: Product }) {
+  return <SlowCardUI product={product} />;
+}
+```
+
+</Tab>
+<Tab label="Optimized">
+
+```tsx
+// ✅ Cards only re-render when their `product` prop changes
+const ProductCard = memo(function ProductCard({ product }: { product: Product }) {
+  return <SlowCardUI product={product} />;
+});
+
+function ProductGrid({ products }: { products: Product[] }) {
+  const [now, setNow] = useState(Date.now());
+  // … same interval …
+  return (
+    <>
+      <Clock time={now} />
+      {products.map((p) => <ProductCard key={p.id} product={p} />)}
+    </>
+  );
+}
+
+// Even better here: move the clock state INTO <Clock /> so the grid never re-renders.
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's faster">
+- A shallow prop comparison (a few `===` checks) is much cheaper than rendering a big subtree.
+- It's most useful for components that are **slow to render** and **often re-rendered with the same props** (list rows, charts, cards).
+- It only works if props are **stable**: primitives, or objects/functions kept stable with [useMemo](/fundamentals/use-memo) / [useCallback](/fundamentals/use-callback).
+</Callout>
+
+## How to use
+
+1. Profile first (React DevTools Profiler) to find components that re-render often and slowly.
+2. Wrap them: `export default memo(MyComponent)`.
+3. Make their props stable: `useCallback` for functions, `useMemo` for objects/arrays, or pass primitives (`id` instead of `{ id }`).
+4. Before reaching for `memo`, try **moving state down** or passing **children** (see [Rendering](/fundamentals/rendering)). It's often simpler.
+
+## Use-case demos
+
+### Use case 1: memo + useCallback for a list with actions
+
+```tsx
+const TodoItem = memo(function TodoItem({ todo, onToggle }: { todo: Todo; onToggle: (id: string) => void }) {
+  return (
+    <label>
+      <input type="checkbox" checked={todo.done} onChange={() => onToggle(todo.id)} />
+      {todo.text}
+    </label>
+  );
+});
+
+function TodoList({ todos, setTodos }: Props) {
+  const onToggle = useCallback(
+    (id: string) => setTodos((prev) => prev.map((t) => (t.id === id ? { ...t, done: !t.done } : t))),
+    [setTodos],
+  );
+  return todos.map((t) => <TodoItem key={t.id} todo={t} onToggle={onToggle} />);
+  // Toggling one todo re-renders only that item (others keep the same object)
+}
+```
+
+### Use case 2: custom comparison (use rarely)
+
+```tsx
+const Chart = memo(
+  function Chart({ points, title }: { points: Point[]; title: string }) {
+    return <HeavyCanvasChart points={points} title={title} />;
+  },
+  // Only re-render if the number of points or the title changed
+  (prev, next) => prev.title === next.title && prev.points.length === next.points.length,
+);
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Inline props break memo**: `style={{ color: "red" }}`, `onClick={() => …}` and `items={list.filter(…)}` are new every render.
+- `children` JSX is a new object every render, so memo on a component that takes `children` rarely helps.
+- Don't wrap everything. Comparing props for cheap components costs more than just rendering them.
+- A custom comparison that ignores props can show **stale UI**. Prefer stabilizing the props.
+</Callout>

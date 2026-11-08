@@ -1,0 +1,143 @@
+---
+title: Rendering & Re-renders
+summary: When and why components re-render, and how to keep re-renders cheap.
+category: fundamentals
+order: 4
+difficulty: intermediate
+tags: [rendering, re-render, performance, react-devtools]
+technologies: [Render phase, Commit phase, Batching, React DevTools Profiler]
+updated: 2026-11-08
+---
+
+## What it is
+
+**Rendering** means React calls your component function to find out what the UI should look like. It happens in two steps:
+
+1. **Render phase**: React calls components and builds the new virtual tree (pure, no DOM changes).
+2. **Commit phase**: React applies only the **differences** to the real DOM, then runs effects.
+
+A component re-renders when:
+- **Its state changes** (`setState` with a new value)
+- **Its parent re-renders** (by default, all children re-render too, even with the same props)
+- **A context it uses changes**
+
+Props changing is **not** the trigger by itself. It's the parent re-rendering that passes them.
+
+<Callout type="info" title="Re-render ≠ DOM update">
+A re-render is just calling a function. If the output is the same, React doesn't touch the DOM. Re-renders are usually cheap. They only matter when a component is **slow** or renders **very often**.
+</Callout>
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ State at the top: typing re-renders the WHOLE page, including the slow chart
+export default function Dashboard() {
+  const [search, setSearch] = useState("");
+  return (
+    <>
+      <input value={search} onChange={(e) => setSearch(e.target.value)} />
+      <SearchResults query={search} />
+      <ExpensiveChart />      {/* re-renders on every keystroke */}
+      <BigTable />            {/* re-renders on every keystroke */}
+    </>
+  );
+}
+
+// ❌ Setting state during render → infinite loop
+function Bad() {
+  const [n, setN] = useState(0);
+  setN(n + 1);
+  return <p>{n}</p>;
+}
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ Move state down: only SearchSection re-renders while typing
+function SearchSection() {
+  const [search, setSearch] = useState("");
+  return (
+    <>
+      <input value={search} onChange={(e) => setSearch(e.target.value)} />
+      <SearchResults query={search} />
+    </>
+  );
+}
+
+export default function Dashboard() {
+  return (
+    <>
+      <SearchSection />
+      <ExpensiveChart />   {/* ✅ unaffected by typing */}
+      <BigTable />
+    </>
+  );
+}
+
+// ✅ Or pass slow parts as children: they're created by the parent, so they don't re-render
+function ScrollTracker({ children }: { children: React.ReactNode }) {
+  const [y, setY] = useState(0);
+  useEffect(() => {
+    const on = () => setY(window.scrollY);
+    window.addEventListener("scroll", on, { passive: true });
+    return () => window.removeEventListener("scroll", on);
+  }, []);
+  return <div><ProgressBar y={y} />{children}</div>;
+}
+
+<ScrollTracker><ExpensiveChart /></ScrollTracker>
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why this works">
+- **Moving state down** shrinks the part of the tree that re-renders. This is the cheapest optimization, with no memoization needed.
+- **`children` as props**: elements created by a parent that didn't re-render are the same objects, so React skips them.
+- React 18+ **batches** multiple `setState` calls (even in timeouts and promises) into one re-render.
+</Callout>
+
+## How to use
+
+1. Measure first: React DevTools → Profiler → record → see what rendered and how long it took.
+2. Turn on **"Highlight updates when components render"** in DevTools settings to see re-renders live.
+3. Fix in this order: **move state down** → **lift content up (children)** → [React.memo](/fundamentals/react-memo) / [useMemo](/fundamentals/use-memo) / [useCallback](/fundamentals/use-callback).
+4. Split contexts so unrelated consumers don't re-render (see [Context API](/fundamentals/context-api)).
+
+## Use-case demos
+
+### Use case 1: see why something re-rendered (dev only)
+
+```tsx
+function useWhyDidYouRender(name: string, props: Record<string, unknown>) {
+  const prev = useRef(props);
+  useEffect(() => {
+    const changed = Object.keys(props).filter((k) => !Object.is(prev.current[k], props[k]));
+    if (changed.length) console.log(`[${name}] changed props:`, changed);
+    prev.current = props;
+  });
+}
+```
+
+### Use case 2: keys control whether state is kept or reset
+
+```tsx
+// ✅ Stable ids: React keeps each row's state when the list re-orders
+{items.map((i) => <Row key={i.id} item={i} />)}
+
+// ❌ Index keys: after deleting item 0, row 1's input state "moves" to the wrong item
+{items.map((i, idx) => <Row key={idx} item={i} />)}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- Don't optimize re-renders you haven't measured. Most are fast.
+- In development with Strict Mode, components render **twice** on purpose to catch impure code. Production renders once.
+- Calling `setState` during render (outside a condition) causes an infinite loop.
+</Callout>

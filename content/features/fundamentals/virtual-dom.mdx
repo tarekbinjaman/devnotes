@@ -1,0 +1,126 @@
+---
+title: Virtual DOM & Reconciliation
+summary: How React compares UI trees and updates only what changed in the real DOM.
+category: fundamentals
+order: 5
+difficulty: intermediate
+tags: [virtual-dom, reconciliation, keys, internals]
+technologies: [Virtual DOM, Reconciliation, Diffing, Keys, Fiber]
+updated: 2026-11-08
+---
+
+## What it is
+
+The **virtual DOM** is a lightweight JavaScript description of the UI: plain objects like `{ type: "button", props: { children: "Save" } }`. JSX compiles to these objects.
+
+On every render React:
+1. Builds a **new** virtual tree from your components.
+2. **Diffs** it against the previous tree (**reconciliation**).
+3. Applies the **minimum** set of real DOM changes in the commit phase.
+
+```text
+State change → render() → new virtual tree ──┐
+                                             ├─ diff → patch real DOM (only changed nodes)
+               previous virtual tree ────────┘
+```
+
+### The diffing rules (why keys matter)
+
+React uses two shortcuts to make diffing fast (O(n)):
+1. **Different element type** (`<div>` → `<section>`, or `<Login>` → `<Dashboard>`) → React **destroys** the old subtree (state lost) and builds a new one.
+2. **Same type at the same position** → React keeps the DOM node and component state, and only updates changed attributes.
+3. **Lists** → React matches children by **`key`**. Without stable keys it matches by position.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ Index as key in a list that can be reordered/filtered/deleted
+{todos.map((t, i) => (
+  <li key={i}>
+    <input defaultValue={t.text} />  {/* typed text jumps to the wrong row after delete */}
+  </li>
+))}
+
+// ❌ Random keys: new key every render → every row is destroyed and re-created
+{todos.map((t) => <TodoRow key={Math.random()} todo={t} />)}
+
+// ❌ Changing the wrapper type conditionally resets all state inside
+return isMobile ? <div><Editor /></div> : <section><Editor /></section>;
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ Stable, unique key from the data
+{todos.map((t) => (
+  <li key={t.id}>
+    <input defaultValue={t.text} />
+  </li>
+))}
+
+// ✅ Keep the same element type; change only props/classes
+return (
+  <div className={isMobile ? "mobile" : "desktop"}>
+    <Editor />   {/* same position + same type → state preserved */}
+  </div>
+);
+
+// ✅ Use a key ON PURPOSE to reset a component
+<ChatRoom key={roomId} roomId={roomId} />  // switching rooms gives a fresh component
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's efficient">
+- Comparing JS objects is much cheaper than touching the real DOM (layout and paint).
+- **Stable keys** let React **move** existing DOM nodes instead of destroying and re-creating them, and keep each item's state attached to the right item.
+- **Fiber** (React's engine) can split rendering into chunks and pause it for urgent updates like typing. That's what powers `useDeferredValue` and `useTransition`.
+</Callout>
+
+## How to use
+
+1. Always give list items a `key` that is **stable** and **unique among siblings** (database id, slug).
+2. Use index keys **only** for static lists that never reorder or change.
+3. Keep the same element/component type at the same position to keep state.
+4. Change `key` deliberately when you want a component to fully reset.
+
+## Use-case demos
+
+### Use case 1: what JSX actually becomes
+
+```tsx
+// You write:
+<button className="btn" onClick={save}>Save</button>
+
+// Compiles to (simplified):
+jsx("button", { className: "btn", onClick: save, children: "Save" })
+
+// Which returns a plain object (a virtual DOM node):
+{ type: "button", props: { className: "btn", onClick: save, children: "Save" } }
+```
+
+### Use case 2: reset a form after successful submit
+
+```tsx
+const [formKey, setFormKey] = useState(0);
+
+async function onSubmit(data: FormData) {
+  await save(data);
+  setFormKey((k) => k + 1); // new key → form remounts with empty fields
+}
+
+<ContactForm key={formKey} onSubmit={onSubmit} />
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- The virtual DOM isn't "faster than the DOM". It's a way to write declarative UI with **reasonably** minimal updates. Huge lists still need [virtualization](/css/virtualized-list).
+- Duplicate keys cause warnings and wrong updates.
+- Moving a component into a different parent element changes its position, so its state resets.
+</Callout>
