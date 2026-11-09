@@ -142,3 +142,53 @@ return { items, total, pages: Math.ceil(total / 25) };
 - Cursor pagination can't jump to "page 37". Use offset for small admin tables that need page numbers.
 - Never build SQL by string-concatenating user input. Use parameters or the ORM.
 </Callout>
+
+## Interview questions
+
+<QA q="Why filter and paginate on the server instead of sending everything to the client?" level="junior">
+
+Sending a large dataset wastes bandwidth, makes the first load slow, uses a lot of memory in the browser, and can expose data the user shouldn't see. The database is built to filter, sort and limit efficiently, especially with indexes. The client receives only one page (for example 20 to 50 rows) plus whatever it needs to request the next page.
+
+</QA>
+
+<QA q="Offset pagination vs cursor (keyset) pagination?" level="mid">
+
+Offset uses `LIMIT 20 OFFSET 400`: simple and supports jumping to page N, but the database must still read and discard all skipped rows, so deep pages get slower, and rows inserted or deleted between requests cause duplicates or skipped items. Cursor pagination uses the last row's sort key: `WHERE (created_at, id) < ($1, $2) ORDER BY created_at DESC, id DESC LIMIT 20`. It stays fast at any depth with a matching index and is stable while data changes, but can't jump to an arbitrary page. Use cursors for feeds and infinite scroll, offset for small admin tables with page numbers.
+
+</QA>
+
+<QA q="Why does cursor pagination need a unique tie-breaker column?" level="mid">
+
+If you sort only by a non-unique column like `created_at`, several rows can share the same value. A cursor of `created_at < X` would skip the remaining rows with exactly that timestamp, and `<=` would repeat them. Adding a unique column such as `id` to both the `ORDER BY` and the cursor condition makes the order total and deterministic. The index should match, for example on `(created_at, id)`.
+
+</QA>
+
+<QA q="What's wrong with this code?" level="junior">
+
+```ts
+const rows = await db.query(
+  `SELECT * FROM products WHERE name LIKE '%${q}%' ORDER BY ${sort} LIMIT ${limit}`
+);
+```
+
+It builds SQL from user input, so it's open to **SQL injection**: a crafted `q` or `sort` can read or destroy data. Pass values as parameters (`WHERE name ILIKE $1` with `'%' + q + '%'` as the value). Column names and sort direction can't be parameters, so validate them against an allowlist (with Zod or a simple map). Also cap `limit` so a client can't request a million rows.
+
+</QA>
+
+<QA q="How do you validate filter and pagination query parameters?" level="mid">
+
+Treat every query param as untrusted text. Parse it with a schema (for example Zod): coerce numbers, enforce bounds (`limit` between 1 and 100), restrict `sort` and filter fields to known values, and give defaults. Return `400 Bad Request` with a clear message for invalid input. This prevents injection through identifiers, avoids expensive queries, and documents the API's contract.
+
+</QA>
+
+<QA q="Should the API return the total count of matching rows?" level="senior">
+
+Only if the UI really needs it. `COUNT(*)` with filters requires scanning all matching rows (PostgreSQL has no cheap cached row count because of MVCC), so on large tables it can cost more than fetching the page. Alternatives: fetch `limit + 1` rows to know whether a next page exists (`hasNextPage`), show an estimate (for unfiltered tables, `reltuples` from `pg_class` or the planner's estimate), or cap the count ('1000+'). Infinite scroll usually needs no total.
+
+</QA>
+
+<QA q="The products list endpoint takes 3 seconds with filters applied. How do you investigate?" level="senior">
+
+Log the generated SQL and run it with `EXPLAIN (ANALYZE, BUFFERS)` against production-like data. Look for sequential scans on large tables, sorts that spill to disk, large row counts discarded by filters, and deep offsets. Then add or adjust indexes to match the filter and sort columns (see [SQL Indexes](/backend/sql-indexes)), switch to cursor pagination, select only needed columns instead of `SELECT *`, and use a search index (full-text or `pg_trgm`) for `contains` searches. Consider caching common filter combinations.
+
+</QA>

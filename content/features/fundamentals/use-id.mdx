@@ -1,0 +1,233 @@
+---
+title: useId
+summary: Generate stable, unique ids for accessibility attributes that match between server and client rendering.
+category: fundamentals
+order: 22
+difficulty: beginner
+tags: [hooks, useId, accessibility, ssr, forms]
+technologies: [useId, aria attributes, htmlFor, SSR hydration]
+updated: 2026-11-08
+---
+
+## What it is
+
+`useId()` returns a **unique string id** that is **stable** for the lifetime of the component and **identical on the server and the client**. You use it to connect elements through HTML attributes that need ids:
+
+- `<label htmlFor={id}>` + `<input id={id}>`
+- `aria-describedby`, `aria-labelledby`, `aria-controls`, `aria-errormessage`
+
+```tsx
+const id = useId(); // e.g. ":r1:" in React 18 (exact format is an implementation detail)
+```
+
+Why not hard-code `id="email"`? Because a reusable component can be rendered **many times on one page**, and duplicate ids break labels and screen readers. Why not `Math.random()` or a global counter? Because the value would differ between the server HTML and the client render, causing **hydration mismatches**.
+
+`useId` derives the id from the component's **position in the tree**, which is the same on server and client, so it is both unique and deterministic.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ Hard-coded id: two EmailFields on a page = duplicate ids, label clicks focus the wrong input
+function EmailField() {
+  return (
+    <>
+      <label htmlFor="email">Email</label>
+      <input id="email" type="email" />
+    </>
+  );
+}
+
+// ❌ Random id: different on server and client -> hydration mismatch, changes every render
+function PasswordField() {
+  const id = `pw-${Math.random().toString(36).slice(2)}`;
+  return (
+    <>
+      <label htmlFor={id}>Password</label>
+      <input id={id} type="password" />
+    </>
+  );
+}
+
+// ❌ Module-level counter: depends on render order, breaks with SSR and Strict Mode
+let counter = 0;
+function Field() {
+  const id = `field-${counter++}`;
+  return <input id={id} />;
+}
+
+// ❌ useId for list keys
+{items.map((item) => <Row key={useId()} item={item} />)} // also breaks the rules of hooks
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ Unique per instance, stable across renders, same on server and client
+function EmailField({ error }: { error?: string }) {
+  const id = useId();
+  const errorId = `${id}-error`;
+
+  return (
+    <>
+      <label htmlFor={id}>Email</label>
+      <input
+        id={id}
+        type="email"
+        aria-invalid={!!error}
+        aria-describedby={error ? errorId : undefined}
+      />
+      {error && <p id={errorId} className="text-sm text-red-600">{error}</p>}
+    </>
+  );
+}
+
+// ✅ List keys come from the data
+{items.map((item) => <Row key={item.id} item={item} />)}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why useId works">
+- The id is computed from the component's **path in the React tree**, not from a counter or randomness, so the server and client produce the same string and hydration succeeds.
+- Each component instance gets its **own** id, so a component can be rendered any number of times without duplicates.
+- The value never changes between re-renders, so attributes don't churn and assistive technology keeps the association.
+</Callout>
+
+## How to use
+
+1. Call `const id = useId()` at the top level of the component (normal rules of hooks).
+2. Use it for `id`/`htmlFor` and ARIA attributes that reference other elements.
+3. Need several related ids? Call `useId` once and add suffixes: `` `${id}-label` ``, `` `${id}-hint` ``.
+4. Accept an optional `id` prop for components that let parents override it: `const id = props.id ?? generatedId`.
+5. With multiple React roots on one page, pass `identifierPrefix` to `createRoot` / `hydrateRoot` (and the server renderer) to avoid collisions.
+6. Don't use it for keys, database ids or CSS selectors.
+
+## Use-case demos
+
+### Use case 1: reusable form field with hint and error
+
+```tsx
+type FieldProps = { label: string; hint?: string; error?: string } & React.ComponentProps<"input">;
+
+function TextField({ label, hint, error, id: idProp, ...inputProps }: FieldProps) {
+  const generatedId = useId();
+  const id = idProp ?? generatedId;
+  const hintId = `${id}-hint`;
+  const errorId = `${id}-error`;
+  const describedBy = [hint && hintId, error && errorId].filter(Boolean).join(" ") || undefined;
+
+  return (
+    <div className="space-y-1">
+      <label htmlFor={id} className="font-medium">{label}</label>
+      <input id={id} aria-invalid={!!error} aria-describedby={describedBy} {...inputProps} />
+      {hint && <p id={hintId} className="text-sm text-zinc-500">{hint}</p>}
+      {error && <p id={errorId} className="text-sm text-red-600">{error}</p>}
+    </div>
+  );
+}
+```
+
+### Use case 2: accessible accordion / disclosure
+
+```tsx
+function Accordion({ title, children }: { title: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const buttonId = `${id}-button`;
+  const panelId = `${id}-panel`;
+
+  return (
+    <div>
+      <button id={buttonId} aria-expanded={open} aria-controls={panelId} onClick={() => setOpen((o) => !o)}>
+        {title}
+      </button>
+      <div id={panelId} role="region" aria-labelledby={buttonId} hidden={!open}>
+        {children}
+      </div>
+    </div>
+  );
+}
+```
+
+### Use case 3: labelled modal or group
+
+```tsx
+function SettingsGroup({ title, children }: { title: string; children: React.ReactNode }) {
+  const headingId = useId();
+  return (
+    <section aria-labelledby={headingId}>
+      <h2 id={headingId}>{title}</h2>
+      {children}
+    </section>
+  );
+}
+```
+
+See [Portals](/fundamentals/portals) for using it in an accessible modal and [Forms](/fundamentals/forms) for field validation.
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Not for list keys.** Keys must come from your data; calling hooks inside `map` also breaks the rules of hooks.
+- The generated id contains special characters (React 18 used colons like `:r1:`; the format changes between versions), so it may not be a valid CSS selector without escaping. Don't use it with `querySelector`; use a [ref](/fundamentals/use-ref) instead.
+- It doesn't give you an id for data (database rows, cache keys). Use `crypto.randomUUID()` when creating the data.
+- Server and client must render the **same component tree** for the ids to match. Conditional rendering based on `typeof window` breaks this.
+- If a parent passes an explicit `id`, prefer it over the generated one so consumers stay in control.
+</Callout>
+
+## Interview questions
+
+<QA q="What is useId used for?" level="junior">
+
+`useId` generates a unique, stable id string for a component instance, mainly to link elements through accessibility attributes like `htmlFor`, `aria-describedby` and `aria-labelledby`. It guarantees uniqueness even when the same component is rendered many times on a page, and it produces the same value on the server and the client.
+
+</QA>
+
+<QA q="Why not just use Math.random() or uuid to generate ids for labels?" level="junior">
+
+A random value generated during render is different on every render, and different between the server HTML and the client's hydration render. That causes hydration mismatch errors and attributes that change constantly. `useId` is deterministic because it's based on the component's position in the tree, so it's stable and matches across server and client.
+
+</QA>
+
+<QA q="Can you use useId to generate keys for a list?" level="mid">
+
+No. Keys should come from the data so React can match items across renders when the list changes; `useId` is tied to the component that calls it, not to the items. Also, calling a hook inside `map` violates the rules of hooks. Use a stable id from your data, or generate one with `crypto.randomUUID()` when the item is created.
+
+</QA>
+
+<QA q="How does useId stay consistent between server and client?" level="senior">
+
+React derives the id from the component's path in the tree (essentially which child of which parent it is), rather than from a global counter. As long as the server and client render the same tree, each component gets the same path and therefore the same id, regardless of the order in which things render or stream in. That's why a global incrementing counter fails with streaming SSR and concurrent rendering, but `useId` does not.
+
+</QA>
+
+<QA q="How do you generate several related ids in one component?" level="mid">
+
+Call `useId` once and append suffixes, for example:
+
+```tsx
+const id = useId();
+const inputId = `${id}-input`;
+const hintId = `${id}-hint`;
+```
+
+The base id is unique, so the suffixed ids are too. You can also call `useId` several times, but one call with suffixes is the recommended pattern.
+
+</QA>
+
+<QA q="What is identifierPrefix and when do you need it?" level="senior">
+
+`identifierPrefix` is an option on `createRoot`, `hydrateRoot` and the server rendering APIs that adds a prefix to every id generated by `useId` in that root. You need it when multiple independent React apps (roots) render on the same page, because each root numbers its ids independently and they could collide. The server and client must use the same prefix.
+
+</QA>
+
+<QA q="Why can't you use the id from useId in querySelector?" level="mid">
+
+The generated string has historically contained characters like colons that are not valid in CSS selectors without escaping with `CSS.escape`, and its format is an implementation detail that has changed between React versions. Relying on it in selectors is discouraged. In React, use a ref to get the DOM node; `document.getElementById(id)` also works because it doesn't parse a selector.
+
+</QA>

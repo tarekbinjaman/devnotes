@@ -129,3 +129,53 @@ CREATE INDEX idx_orders_status_cover ON orders (status) INCLUDE (total, created_
 - Wrapping a column in a function (`WHERE date(created_at) = ...`) prevents the index unless you create an expression index.
 - Index `(a, b)` helps `WHERE a = ?` and `WHERE a = ? AND b = ?`, but **not** `WHERE b = ?` alone.
 </Callout>
+
+## Interview questions
+
+<QA q="What is a database index? Explain it simply." level="junior">
+
+An index is a separate data structure that keeps column values sorted with pointers to the table rows, like the index at the back of a book. Instead of reading every row (a sequential scan), the database can jump to the matching entries. PostgreSQL's default index type is a **B-tree**, which supports equality and range comparisons (`=`, `<`, `>`, `BETWEEN`) and can return rows already in sorted order for `ORDER BY`.
+
+</QA>
+
+<QA q="Why not index every column?" level="junior">
+
+Every index must be updated on each `INSERT`, `UPDATE` (of indexed columns) and `DELETE`, which slows writes, and each one takes disk space and memory. Many indexes also make the planner's job harder and may never be used. Index the columns that real, frequent queries filter, join or sort on, and remove unused ones (check `pg_stat_user_indexes`).
+
+</QA>
+
+<QA q="How does column order matter in a composite index?" level="mid">
+
+A B-tree on `(a, b)` is sorted by `a` first, then by `b` within each `a`. So it efficiently serves conditions on `a`, or on `a` and `b`, and `WHERE a = ? ORDER BY b`. A condition only on `b` usually can't use it efficiently (PostgreSQL 18 added skip scan, which helps in some cases when `a` has few distinct values). A good rule: put equality-filtered columns first, then the range or sort column.
+
+</QA>
+
+<QA q="How do you know whether a query uses an index?" level="mid">
+
+Run `EXPLAIN ANALYZE` on the query. Look for `Index Scan`, `Index Only Scan` or `Bitmap Index Scan` versus `Seq Scan`, and compare estimated rows with actual rows: big differences suggest stale statistics (run `ANALYZE`). Remember that `EXPLAIN ANALYZE` actually executes the query, so wrap data-modifying statements in a transaction you roll back. Adding `BUFFERS` shows how much data was read from cache versus disk.
+
+</QA>
+
+<QA q="I added an index but PostgreSQL still does a sequential scan. Why?" level="mid">
+
+Common reasons: the query matches a large fraction of the table, so reading it sequentially is genuinely cheaper; the table is small; the column is wrapped in a function or cast (`lower(email)`, `date(created_at)`) that doesn't match the index (create an expression index); a leading wildcard `LIKE '%term'` can't use a B-tree; a type mismatch between the parameter and column; or statistics are outdated. The planner chooses by estimated cost, so verify with `EXPLAIN ANALYZE` rather than forcing an index.
+
+</QA>
+
+<QA q="What are partial and covering indexes?" level="senior">
+
+A **partial index** indexes only rows matching a condition, for example `CREATE INDEX ON orders (created_at) WHERE status = 'pending'`. It's smaller and faster when queries always include that condition. A **covering index** contains every column a query needs, so PostgreSQL can do an index-only scan without visiting the table; you can add non-key columns with `INCLUDE (...)`. Index-only scans depend on the visibility map, so they work best on tables that are vacuumed regularly.
+
+</QA>
+
+<QA q="How do you add an index to a large production table without downtime?" level="senior">
+
+A plain `CREATE INDEX` blocks writes (inserts, updates, deletes) on the table until it finishes. Use `CREATE INDEX CONCURRENTLY`, which allows writes to continue at the cost of a slower build that scans the table twice. It can't run inside a transaction block, and if it fails it leaves an `INVALID` index that you must drop and recreate. Many migration tools need a setting to run it outside a transaction.
+
+</QA>
+
+<QA q="When would you use a GIN index instead of a B-tree?" level="senior">
+
+GIN (Generalized Inverted Index) indexes elements **inside** a value, which B-trees can't do: words in a `tsvector` for full-text search, keys in `jsonb` (with `@>` containment queries), array elements, and trigrams with the `pg_trgm` extension for fast `ILIKE '%term%'` searches. GIN is fast for lookups but slower to update and larger than a B-tree, so use it where those query types matter.
+
+</QA>

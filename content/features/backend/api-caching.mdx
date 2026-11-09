@@ -150,3 +150,53 @@ export async function GET(req: Request) {
 - Cache stampede: when a hot key expires, many requests hit the DB at once. `stale-while-revalidate` or a lock helps.
 - Caching hides bugs in dev. Use short TTLs locally, or a way to bypass the cache.
 </Callout>
+
+## Interview questions
+
+<QA q="What are the main layers where an API response can be cached?" level="junior">
+
+From closest to the user to furthest: the **browser** cache (controlled by `Cache-Control` headers), a **CDN** or reverse proxy (shared cache at the edge), an **application cache** such as Redis or an in-memory map in the server, and the **database's** own caches (buffer cache, materialized views). Each layer closer to the user saves more latency and load, but is harder to invalidate.
+
+</QA>
+
+<QA q="Explain Cache-Control: public, max-age=60, stale-while-revalidate=300." level="mid">
+
+`public` allows shared caches (CDNs, proxies) to store the response. `max-age=60` means it's fresh for 60 seconds, so caches serve it without contacting the server. `stale-while-revalidate=300` means that for 300 seconds after it becomes stale, a cache may still serve the stale copy immediately while it fetches a fresh one in the background. Users get fast responses and the origin sees at most about one revalidation per interval. For shared caches only, `s-maxage` overrides `max-age`.
+
+</QA>
+
+<QA q="What is the difference between no-cache, no-store and private?" level="mid">
+
+`no-store` means don't store the response anywhere: use it for sensitive data. `no-cache` is misleadingly named: caches **may** store the response but must revalidate with the server (for example via `ETag`) before each use. `private` means only the user's browser may cache it, not shared caches like CDNs: use it for per-user responses that are fine to cache locally.
+
+</QA>
+
+<QA q="How do ETags and conditional requests work?" level="mid">
+
+The server sends an `ETag` header, an identifier (often a hash) of the response's current version. On the next request, the browser sends `If-None-Match` with that value. If the resource hasn't changed, the server replies `304 Not Modified` with no body, so the client reuses its cached copy. It still costs a round trip, but saves bandwidth and often serialization work. `Last-Modified` with `If-Modified-Since` is the older, timestamp-based equivalent.
+
+</QA>
+
+<QA q="What's wrong with putting public, max-age=300 on GET /api/me?" level="junior">
+
+That endpoint returns data for the logged-in user, decided by a cookie or token. With `public`, a CDN may store the first user's response and serve it to everyone else who requests the same URL, leaking personal data. Per-user responses should be `private` (or `no-store` if sensitive), and if a shared cache must vary by something, use the `Vary` header carefully, or don't cache at the edge at all.
+
+</QA>
+
+<QA q="What is a cache stampede, and how do you prevent it?" level="senior">
+
+When a popular key expires, many concurrent requests miss the cache at the same moment and all hit the database to rebuild it, which can overload it. Mitigations: serve stale data while one request refreshes it (stale-while-revalidate); use a lock or single-flight so only one request recomputes while others wait or get stale data; add random jitter to TTLs so keys don't expire together; or refresh hot keys proactively before they expire.
+
+</QA>
+
+<QA q="Time-based expiry vs event-based invalidation: what are the trade-offs?" level="senior">
+
+TTL expiry is simple and self-healing, but users can see stale data for up to the TTL, and short TTLs reduce the cache's benefit. Event-based invalidation (delete or update the key when data changes, or `revalidateTag`/`revalidatePath` in Next.js) keeps data fresh, but you must find every write path, and a missed one leaves stale data indefinitely. A common combination: invalidate on writes **and** keep a TTL as a safety net.
+
+</QA>
+
+<QA q="Cache-aside vs write-through caching?" level="senior">
+
+In **cache-aside** (lazy loading), the application reads from the cache, and on a miss loads from the database and stores the result. It's simple and only caches what's requested, but the first request is slow and data can be stale until expiry or invalidation. In **write-through**, every write updates the database and the cache together, so reads are fresh, at the cost of slower writes and caching data that may never be read. Cache-aside with Redis is the most common choice for APIs.
+
+</QA>
