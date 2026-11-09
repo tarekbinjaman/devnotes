@@ -1,0 +1,339 @@
+---
+title: Project Structure & TypeScript Patterns
+summary: Organize a Next.js App Router codebase by feature and use TypeScript patterns (discriminated unions, generics, satisfies, validated env) that keep it safe as it grows.
+category: production
+order: 13
+difficulty: intermediate
+tags: [architecture, folder-structure, typescript, nextjs, env, dx]
+technologies: [Next.js App Router, TypeScript, Zod, route groups, path aliases, satisfies]
+updated: 2026-11-09
+---
+
+## What it is
+
+A small app survives any structure. A production app with 10 developers and 200 screens doesn't: files are hard to find, features leak into each other, and refactors break things in unexpected places. A good structure answers **"where does this go?"** without a meeting.
+
+The pattern that scales well with the App Router is **feature-based**:
+
+```txt
+src/
+  app/                      # routing only: pages, layouts, route handlers
+    (marketing)/            # route group: own layout, no URL segment
+      page.tsx
+      pricing/page.tsx
+    (app)/
+      layout.tsx            # authenticated shell
+      dashboard/
+        page.tsx
+        _components/        # private folder: colocated, never routable
+          revenue-card.tsx
+      invoices/
+        [id]/page.tsx
+    api/webhooks/stripe/route.ts
+  components/
+    ui/                     # design system: Button, Input, Dialog (no business logic)
+  features/
+    invoices/               # everything about one domain
+      components/
+      actions.ts            # Server Actions
+      queries.ts            # server-only data access
+      schemas.ts            # Zod schemas + inferred types
+      types.ts
+    billing/
+  lib/                      # framework-agnostic helpers: utils, formatters, env
+  server/                   # server-only infrastructure: db client, auth guards, email
+```
+
+Principles: **routes stay thin** (they compose features), **code used by one route lives next to it** (colocation), **shared domain code lives in `features/`**, and **generic UI lives in `components/ui`**. TypeScript patterns then make the boundaries explicit: validated env vars, typed UI states, reusable typed components.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```txt
+src/
+  components/      # ❌ 180 files, from Button to InvoicePdfExportModal
+  hooks/           # ❌ useInvoice next to useDebounce next to useAuth
+  utils/           # ❌ helpers.ts with 2,000 lines
+  types/           # ❌ index.ts with every type in the app
+  pages/ ...
+```
+
+```ts
+// ❌ Unvalidated env: undefined at runtime, crashes deep in a request
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+
+// ❌ Boolean soup: impossible states are representable
+type State = { loading: boolean; error?: string; data?: Invoice[] };
+// { loading: true, error: "x", data: [...] } compiles fine
+
+// ❌ Barrel that re-exports everything, including server code
+// features/index.ts
+export * from "./invoices/queries"; // imports the DB client
+export * from "./invoices/components";
+```
+
+</Tab>
+<Tab label="Correct">
+
+```ts
+// lib/env.ts: public vars, safe to import anywhere
+import { z } from "zod";
+
+const client = z.object({
+  NEXT_PUBLIC_APP_URL: z.string().url(),
+});
+
+// ✅ NEXT_PUBLIC_ vars must be referenced literally so Next.js can inline them
+export const clientEnv = client.parse({
+  NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
+});
+```
+
+```ts
+// server/env.ts
+import "server-only";
+import { z } from "zod";
+
+export const serverEnv = z
+  .object({
+    DATABASE_URL: z.string().url(),
+    STRIPE_SECRET_KEY: z.string().startsWith("sk_"),
+    AUTH_SECRET: z.string().min(32),
+  })
+  .parse(process.env); // ✅ fails fast with a clear message listing missing vars
+```
+
+```ts
+// ✅ Discriminated union: only valid states exist
+type InvoicesState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "error"; error: string }
+  | { status: "success"; data: Invoice[] };
+
+// ✅ Import from the specific module, not a giant barrel
+import { InvoiceTable } from "@/features/invoices/components/invoice-table";
+import { getInvoices } from "@/features/invoices/queries";
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why this scales">
+- **Feature folders** keep related code together, so a change to invoices touches one folder and deleting a feature is deleting a folder.
+- **Thin routes** keep `app/` readable as a map of URLs instead of a mix of routing and business logic.
+- **Validated env** turns "works on my machine" runtime crashes into a clear error at boot or build time.
+- **Discriminated unions** let the compiler reject impossible UI states and force you to handle every case.
+- **Direct imports** instead of catch-all barrels keep bundles small and stop server-only code from being dragged into client modules.
+</Callout>
+
+## How to use
+
+1. Keep `app/` for routing files (`page`, `layout`, `loading`, `error`, `route`). Colocate route-only components in a private `_components` folder.
+2. Use **route groups** like `(marketing)` and `(app)` to give sections different layouts (public vs authenticated) without changing URLs.
+3. Move code into `features/<name>` once a second route needs it. Split it into `components`, `actions.ts`, `queries.ts`, `schemas.ts`.
+4. Put generic, business-free UI in `components/ui` and infrastructure (DB, auth guards, email) in `server/` with `import "server-only"`.
+5. Configure a path alias in `tsconfig.json` (`"paths": { "@/*": ["./src/*"] }`, which `create-next-app` sets up) and avoid deep `../../../` imports.
+6. Validate environment variables with Zod in one module. Only variables prefixed `NEXT_PUBLIC_` are inlined into the browser bundle; everything else is server-only, so **never** prefix secrets with it.
+7. Turn on `"strict": true` (and consider `noUncheckedIndexedAccess`), model UI states as discriminated unions, and infer types from Zod schemas with `z.infer` instead of duplicating them.
+
+## Use-case demos
+
+### Use case 1: discriminated union for a dashboard widget
+
+```tsx
+type WidgetState<T> =
+  | { status: "loading" }
+  | { status: "error"; error: string; retry: () => void }
+  | { status: "empty" }
+  | { status: "ready"; data: T };
+
+function RevenueWidget({ state }: { state: WidgetState<RevenuePoint[]> }) {
+  switch (state.status) {
+    case "loading":
+      return <Skeleton />;
+    case "error":
+      return <ErrorCard message={state.error} onRetry={state.retry} />; // ✅ error is defined here
+    case "empty":
+      return <p>No revenue yet.</p>;
+    case "ready":
+      return <Chart data={state.data} />; // ✅ data is typed, not optional
+    default: {
+      const _exhaustive: never = state; // ✅ compile error if a new status isn't handled
+      return _exhaustive;
+    }
+  }
+}
+```
+
+### Use case 2: generic table and extending native props (admin)
+
+```tsx
+// components/ui/data-table.tsx
+import type { ReactNode } from "react";
+
+type Column<T> = {
+  key: keyof T & string;
+  header: string;
+  render?: (row: T) => ReactNode;
+};
+
+export function DataTable<T extends { id: string }>({
+  rows,
+  columns,
+}: {
+  rows: T[];
+  columns: Column<T>[];
+}) {
+  return (
+    <table>
+      <thead>
+        <tr>{columns.map((c) => <th key={c.key}>{c.header}</th>)}</tr>
+      </thead>
+      <tbody>
+        {rows.map((row) => (
+          <tr key={row.id}>
+            {columns.map((c) => (
+              <td key={c.key}>{c.render ? c.render(row) : String(row[c.key])}</td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+// Usage: key is checked against User's fields; a typo is a compile error
+<DataTable<User>
+  rows={users}
+  columns={[
+    { key: "email", header: "Email" },
+    { key: "role", header: "Role", render: (u) => <RoleBadge role={u.role} /> },
+  ]}
+/>;
+```
+
+```tsx
+// components/ui/button.tsx: accept every native button prop for free
+import type { ComponentProps } from "react";
+
+type ButtonProps = ComponentProps<"button"> & {
+  variant?: "primary" | "ghost" | "danger";
+};
+
+export function Button({ variant = "primary", className = "", ...props }: ButtonProps) {
+  return <button className={`btn btn-${variant} ${className}`} {...props} />;
+}
+
+// Reuse another component's props without exporting them:
+type DataTableProps = ComponentProps<typeof DataTable>;
+```
+
+### Use case 3: satisfies for config objects and schema-inferred types
+
+```ts
+// features/billing/plans.ts
+type Plan = { name: string; priceCents: number; seats: number | "unlimited" };
+
+// ✅ satisfies checks the shape but keeps the literal keys and types
+export const PLANS = {
+  free: { name: "Free", priceCents: 0, seats: 1 },
+  pro: { name: "Pro", priceCents: 1900, seats: 10 },
+  enterprise: { name: "Enterprise", priceCents: 9900, seats: "unlimited" },
+} satisfies Record<string, Plan>;
+
+export type PlanId = keyof typeof PLANS; // "free" | "pro" | "enterprise"
+// With `: Record<string, Plan>` instead, PlanId would just be string.
+```
+
+```ts
+// features/invoices/schemas.ts: one source of truth for runtime + compile time
+import { z } from "zod";
+
+export const InvoiceInput = z.object({
+  customerId: z.string().uuid(),
+  amountCents: z.number().int().positive(),
+  dueDate: z.coerce.date(),
+});
+
+export type InvoiceInput = z.infer<typeof InvoiceInput>;
+```
+
+The same schema validates the form on the client (see [React Hook Form + Zod](/production/react-hook-form-zod)) and the [Server Action](/production/server-actions) on the server.
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Barrel files** (`index.ts` with `export *`) can pull every module of a feature into a bundle, slow down dev server compilation and tests, create circular imports, and drag server-only code into Client Components. Use them sparingly, for small, purely client-safe or purely server-safe public APIs.
+- **`NEXT_PUBLIC_` is a publishing decision**: the value is inlined into JavaScript any visitor can read. It's also inlined at **build** time, so changing it requires a rebuild.
+- Dynamic access like `process.env[name]` is not inlined for `NEXT_PUBLIC_` variables in client code; reference them literally.
+- Don't over-engineer a tiny app with layers of folders; start colocated and extract to `features/` when code is actually shared.
+- Avoid `as` casts and `any` to silence errors; they hide the bugs strict mode is meant to catch. Validate unknown data (API responses, form input) with Zod instead.
+- Deeply nested generic types can make error messages unreadable; prefer simple, explicit types for component props.
+- Pick a convention (kebab-case files, named exports) and enforce it with ESLint; consistency matters more than which one you choose.
+</Callout>
+
+## Interview questions
+
+<QA q="How would you structure a large Next.js App Router project?" level="mid">
+
+Keep `app/` for routing and composition, with route groups for different layouts and private `_components` folders for route-only code. Put domain logic in `features/<name>` (components, Server Actions, server-only queries, Zod schemas), generic UI in `components/ui`, and infrastructure like the DB client and auth helpers in a `server/` folder marked `server-only`. The goal is that code is grouped by what it does for the business, routes stay thin, and deleting a feature is mostly deleting a folder.
+
+</QA>
+
+<QA q="What are route groups and private folders in the App Router?" level="junior">
+
+A route group is a folder in parentheses, like `(marketing)`, that organizes routes and lets them share a layout without adding a segment to the URL. A private folder starts with an underscore, like `_components`, and is excluded from routing, so you can colocate components, helpers and tests next to a route safely. Both help keep related code together.
+
+</QA>
+
+<QA q="What problems can barrel files cause?" level="mid">
+
+Importing one thing from a barrel can make the bundler and dev server process every module it re-exports, which slows builds and tests and can bloat client bundles when tree-shaking fails due to side effects. Barrels also easily create circular dependencies. In Next.js, a barrel mixing server and client modules can pull server-only code (like a DB client) into a Client Component import chain. Importing from specific files avoids all of this.
+
+</QA>
+
+<QA q="How do environment variables work in Next.js, and how do you keep secrets safe?" level="mid">
+
+Variables are read on the server via `process.env`. Only those prefixed with `NEXT_PUBLIC_` are inlined into client JavaScript at build time, so they're public by definition and fixed per build. Secrets must never carry that prefix and should be read only in server-only modules. Validating all of them with a Zod schema at startup catches missing or malformed values early with a clear error.
+
+</QA>
+
+<QA q="What is a discriminated union and why is it useful for UI state?" level="mid">
+
+It's a union of object types that share a literal field, such as `status`, whose value tells TypeScript which variant you have. Checking `state.status === 'success'` narrows the type so `data` is guaranteed to exist, and impossible combinations like loading plus error can't be represented. With an exhaustive `switch` and a `never` check, adding a new status forces you to handle it everywhere.
+
+```ts
+type State =
+  | { status: "loading" }
+  | { status: "error"; error: string }
+  | { status: "success"; data: User[] };
+```
+
+</QA>
+
+<QA q="What is the difference between satisfies and a type annotation?" level="senior">
+
+A type annotation (`const x: T = ...`) checks the value against `T` and then **widens** the variable to `T`, losing literal information. `satisfies T` checks the value against `T` but keeps the inferred, more specific type. So for a config object, `satisfies Record<string, Plan>` validates every entry and still lets you derive `keyof typeof PLANS` as a union of literal keys. Use annotations when you want the wider type, `satisfies` when you want validation without losing precision.
+
+</QA>
+
+<QA q="How do you type a reusable Button that accepts all native button props?" level="junior">
+
+Use `ComponentProps<'button'>` (or `ComponentPropsWithoutRef<'button'>`) and intersect it with your own props, then spread the rest onto the element. That gives you `onClick`, `disabled`, `type`, ARIA attributes and so on with correct types. `ComponentProps<typeof SomeComponent>` also extracts the props of an existing component without needing it to export its props type.
+
+</QA>
+
+<QA q="A new teammate asks where to put a hook used by both the invoices and billing features. What do you tell them?" level="senior">
+
+If it's generic (like `useDebounce`), it belongs in a shared place such as `lib/` or `hooks/`, with no knowledge of either feature. If it's domain logic shared by both, that's a sign of a missing concept: either one feature owns it and exposes it as part of its public API, or a new shared feature module is extracted. Features should depend on shared code and on each other's explicit exports, not reach into each other's internals; an ESLint import-boundary rule can enforce this.
+
+</QA>
+
+<QA q="Why enable TypeScript strict mode in an existing project, and how would you roll it out?" level="senior">
+
+Strict mode enables checks like `strictNullChecks` and `noImplicitAny` that catch null and undefined bugs, which are among the most common runtime errors. In a large existing codebase, turning it on at once can produce thousands of errors, so teams enable flags incrementally, fix module by module, or use a tool that tracks strict errors per file and prevents new ones. New code should always be written strict-clean, and `any` should be replaced with `unknown` plus validation.
+
+</QA>

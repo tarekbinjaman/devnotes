@@ -1,0 +1,371 @@
+---
+title: Unit & Component Testing (Vitest + Testing Library)
+summary: Test React components the way users use them with Vitest, jsdom, Testing Library, user-event and MSW.
+category: production
+order: 9
+difficulty: intermediate
+tags: [testing, vitest, testing-library, msw, unit-tests, hooks]
+technologies: [Vitest, jsdom, "@testing-library/react", "@testing-library/user-event", "@testing-library/jest-dom", MSW, renderHook]
+updated: 2026-11-09
+---
+
+## What it is
+
+Unit and component tests check small pieces of your app in isolation, fast enough to run on every save:
+
+- **Vitest** is the test runner (Jest-compatible API: `describe`, `it`, `expect`, `vi`), built on Vite so it understands TypeScript, JSX and ESM out of the box.
+- **jsdom** is a fake browser DOM running in Node, so components can render without a real browser.
+- **@testing-library/react** renders components and gives you **queries** that find elements the way a user would (by role, label, text).
+- **@testing-library/user-event** simulates real user interactions (typing, clicking, tabbing) including all the intermediate events.
+- **@testing-library/jest-dom** adds DOM matchers like `toBeInTheDocument()`, `toBeDisabled()`, `toHaveValue()`.
+- **MSW (Mock Service Worker)** intercepts network requests so components can call `fetch` for real while you control the responses.
+
+The guiding principle, from Testing Library: *the more your tests resemble the way your software is used, the more confidence they can give you.* Test **behavior** (what the user sees and does), not **implementation** (state variables, hook calls, component internals). Then you can refactor freely and the tests only fail when something is actually broken.
+
+| Query (priority order) | Use for |
+| --- | --- |
+| `getByRole` | Almost everything: buttons, links, headings, textboxes, dialogs. Use the `name` option. |
+| `getByLabelText` | Form fields (also covered by `getByRole('textbox', ...)`). |
+| `getByPlaceholderText` | Only when there is no label (which is itself an a11y smell). |
+| `getByText` | Non-interactive content: paragraphs, messages. |
+| `getByDisplayValue` | Filled-in form values. |
+| `getByAltText` / `getByTitle` | Images, rarely used title attributes. |
+| `getByTestId` | Last resort when nothing user-visible identifies the element. |
+
+Each query comes in three flavors: `getBy` (throws if missing, synchronous), `queryBy` (returns `null`, use for asserting absence), `findBy` (returns a promise, waits for the element to appear).
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ Testing implementation details and leaning on snapshots
+import { render, fireEvent } from "@testing-library/react";
+import { Counter } from "./Counter";
+
+it("increments", () => {
+  const { container } = render(<Counter />);
+
+  // Reaching into the DOM structure with CSS selectors
+  const button = container.querySelector(".btn-primary")!;
+  fireEvent.click(button);
+
+  // Asserting on a test id instead of what the user sees
+  expect(container.querySelector("[data-testid='count']")!.textContent).toBe("1");
+
+  // Snapshot of the whole tree: breaks on every markup change,
+  // gets blindly updated with -u, and never says what matters
+  expect(container).toMatchSnapshot();
+});
+
+// ❌ Spying on internal state / hooks
+vi.spyOn(React, "useState"); // couples the test to how Counter is written
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ Find elements like a user, interact like a user, assert on output
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { Counter } from "./Counter";
+
+it("increments the count when the user clicks +1", async () => {
+  const user = userEvent.setup();
+  render(<Counter />);
+
+  expect(screen.getByText("Count: 0")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "+1" }));
+
+  expect(screen.getByText("Count: 1")).toBeInTheDocument();
+});
+
+it("disables -1 at zero", () => {
+  render(<Counter />);
+  expect(screen.getByRole("button", { name: "-1" })).toBeDisabled();
+});
+```
+
+</Tab>
+<Tab label="Async data">
+
+```tsx
+// ✅ Wait for async UI with findBy, assert absence with queryBy
+it("shows the user's name after loading", async () => {
+  render(<Profile userId="42" />);
+
+  expect(screen.getByRole("status")).toHaveTextContent("Loading...");
+
+  // findBy* retries until the element appears (default timeout 1000ms)
+  expect(await screen.findByRole("heading", { name: "Ada Lovelace" })).toBeInTheDocument();
+
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why test behavior instead of implementation">
+- A test that checks `useState` values or CSS classes fails when you **refactor** (false negative) but can still pass when the UI is **broken** (false positive). Behavior tests flip both of those.
+- `getByRole` only finds elements exposed in the **accessibility tree** with the right name, so your tests double as a basic accessibility check: if a test can't find the button, a screen reader user can't either.
+- `user-event` fires the full sequence a browser does (pointerdown, mousedown, focus, pointerup, mouseup, click; keydown, keypress, input, keyup per character), so bugs in focus handling or `onKeyDown` show up. `fireEvent` dispatches a single synthetic event.
+- Snapshots are a **change detector**, not a correctness check. Big ones get rubber-stamped. Keep them small and targeted (a serialized config, an error message) if at all.
+</Callout>
+
+## How to use
+
+1. **Install** (works for Vite and Next.js projects):
+
+   ```bash
+   npm i -D vitest jsdom @vitejs/plugin-react vite-tsconfig-paths \
+     @testing-library/react @testing-library/dom @testing-library/user-event \
+     @testing-library/jest-dom msw
+   ```
+
+   `@testing-library/dom` is a peer dependency of `@testing-library/react` 16 and must be installed explicitly.
+
+2. **Configure Vitest** in `vitest.config.mts` (in a Vite app you can put the `test` block in `vite.config.ts` instead):
+
+   ```ts
+   import { defineConfig } from "vitest/config";
+   import react from "@vitejs/plugin-react";
+   import tsconfigPaths from "vite-tsconfig-paths";
+
+   export default defineConfig({
+     plugins: [react(), tsconfigPaths()], // tsconfigPaths resolves "@/..." imports
+     test: {
+       environment: "jsdom",
+       globals: true, // lets Testing Library auto-cleanup after each test
+       setupFiles: ["./vitest.setup.ts"],
+     },
+   });
+   ```
+
+3. **Setup file** registers jest-dom matchers and starts MSW:
+
+   ```ts
+   // vitest.setup.ts
+   import "@testing-library/jest-dom/vitest";
+   import { afterAll, afterEach, beforeAll } from "vitest";
+   import { server } from "./src/mocks/server";
+
+   beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
+   afterEach(() => server.resetHandlers()); // undo per-test overrides
+   afterAll(() => server.close());
+   ```
+
+   If you set `globals: false`, call `cleanup()` from `@testing-library/react` in an `afterEach` yourself. For TypeScript to know `describe`/`it`/`expect` as globals, add `"types": ["vitest/globals"]` to `tsconfig.json`.
+
+4. **Add scripts**: `"test": "vitest"` (watch mode locally) and `"test:ci": "vitest run --coverage"` (needs `@vitest/coverage-v8`).
+
+5. **Write tests next to the code** (`LoginForm.test.tsx`). Per test: render, find elements with `screen.getByRole`, interact with `await user.click/type`, assert on what is visible.
+
+6. **Know the limits**: async Server Components can't be rendered by Vitest and Testing Library today. Test their logic as plain functions and cover the rendered page with [E2E tests](/production/testing-e2e).
+
+## Use-case demos
+
+### Use case 1: login form test with user-event and MSW
+
+```ts
+// src/mocks/handlers.ts
+import { http, HttpResponse } from "msw";
+
+export const handlers = [
+  http.post("/api/login", async ({ request }) => {
+    const { email } = (await request.json()) as { email: string; password: string };
+    if (email === "ada@example.com") {
+      return HttpResponse.json({ id: "1", name: "Ada" });
+    }
+    return HttpResponse.json({ message: "Invalid email or password" }, { status: 401 });
+  }),
+];
+
+// src/mocks/server.ts
+import { setupServer } from "msw/node";
+import { handlers } from "./handlers";
+export const server = setupServer(...handlers);
+```
+
+```tsx
+// LoginForm.test.tsx
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { server } from "@/mocks/server";
+import { LoginForm } from "./LoginForm";
+
+async function fillAndSubmit(email: string) {
+  const user = userEvent.setup();
+  await user.type(screen.getByLabelText("Email"), email);
+  await user.type(screen.getByLabelText("Password"), "test-password");
+  await user.click(screen.getByRole("button", { name: "Sign in" }));
+}
+
+it("calls onSuccess with the user", async () => {
+  const onSuccess = vi.fn();
+  render(<LoginForm onSuccess={onSuccess} />);
+
+  await fillAndSubmit("ada@example.com");
+
+  await vi.waitFor(() => expect(onSuccess).toHaveBeenCalledWith({ id: "1", name: "Ada" }));
+});
+
+it("shows the server error", async () => {
+  render(<LoginForm onSuccess={vi.fn()} />);
+  await fillAndSubmit("wrong@example.com");
+  expect(await screen.findByRole("alert")).toHaveTextContent("Invalid email or password");
+});
+
+it("handles a network failure", async () => {
+  server.use(http.post("/api/login", () => HttpResponse.error())); // override for this test only
+  render(<LoginForm onSuccess={vi.fn()} />);
+  await fillAndSubmit("ada@example.com");
+  expect(await screen.findByRole("alert")).toHaveTextContent(/something went wrong/i);
+});
+
+it("validates required fields without calling the API", async () => {
+  const user = userEvent.setup();
+  render(<LoginForm onSuccess={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "Sign in" }));
+  expect(screen.getByLabelText("Email")).toHaveAccessibleDescription("Email is required");
+});
+```
+
+`waitFor` from Testing Library works the same way as `vi.waitFor` here; both retry the callback until it stops throwing.
+
+### Use case 2: mocking a module and testing a custom hook
+
+```ts
+// useCart.test.tsx
+import { renderHook, act } from "@testing-library/react";
+import { useCart } from "./useCart";
+import { trackEvent } from "@/lib/analytics";
+
+// vi.mock is hoisted above imports: every export becomes a vi.fn()
+vi.mock("@/lib/analytics", () => ({ trackEvent: vi.fn() }));
+
+beforeEach(() => vi.clearAllMocks());
+
+it("adds items and computes the total", () => {
+  const { result } = renderHook(() => useCart());
+
+  act(() => {
+    result.current.add({ id: "p1", price: 1999, qty: 2 });
+  });
+
+  expect(result.current.items).toHaveLength(1);
+  expect(result.current.totalCents).toBe(3998);
+  expect(vi.mocked(trackEvent)).toHaveBeenCalledWith("add_to_cart", { id: "p1" });
+});
+
+// Hooks that need context: pass a wrapper
+it("reads the currency from context", () => {
+  const { result } = renderHook(() => useCart(), {
+    wrapper: ({ children }) => <CurrencyProvider value="EUR">{children}</CurrencyProvider>,
+  });
+  expect(result.current.currency).toBe("EUR");
+});
+```
+
+Mock **boundaries you don't own** (analytics, payment SDKs, `next/navigation`), not your own components. If you find yourself mocking half the app, the unit is too small; test the bigger component instead.
+
+### Use case 3: a reducer is just a pure function
+
+```ts
+// cartReducer.test.ts
+import { cartReducer, initialState } from "./cartReducer";
+
+describe("cartReducer", () => {
+  it("adds a new item", () => {
+    const next = cartReducer(initialState, { type: "added", item: { id: "p1", qty: 1 } });
+    expect(next.items).toEqual([{ id: "p1", qty: 1 }]);
+  });
+
+  it("increments qty when the item already exists", () => {
+    const state = { items: [{ id: "p1", qty: 1 }] };
+    const next = cartReducer(state, { type: "added", item: { id: "p1", qty: 2 } });
+    expect(next.items).toEqual([{ id: "p1", qty: 3 }]);
+  });
+
+  it("does not mutate the previous state", () => {
+    const state = Object.freeze({ items: Object.freeze([{ id: "p1", qty: 1 }]) });
+    expect(() => cartReducer(state as never, { type: "removed", id: "p1" })).not.toThrow();
+  });
+});
+```
+
+No rendering, no DOM: the fastest and most precise tests you can write. Pull complex logic out of components (into reducers, utils, Zod schemas) and test it this way, then keep a few component tests for the wiring.
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **`act(...)` warnings** usually mean a state update happened after the test finished asserting. Fix by awaiting the UI change (`await screen.findBy...`), not by wrapping things in `act` until the warning disappears.
+- Forgetting `await` on `user.click` / `user.type` (user-event 14 is fully async) causes assertions to run before the interaction completes.
+- Using `getBy` to assert something is **gone** throws; use `expect(screen.queryBy...).not.toBeInTheDocument()` or `waitForElementToBeRemoved`.
+- Putting side effects inside `waitFor` (like clicking) runs them many times. Only assertions go inside.
+- Mocking `fetch` by hand with `vi.fn()` couples tests to how you call it (URL format, headers). MSW mocks at the network level, works with any client (fetch, axios, TanStack Query), and the same handlers can power Storybook and local dev.
+- With TanStack Query, create a **new QueryClient per test** with `retry: false`, or cached data and retries leak between tests.
+- jsdom is not a browser: no layout (`getBoundingClientRect` returns zeros), no real navigation, no CSS. Things like scroll behavior, responsive layout and visual bugs belong in [Playwright](/production/testing-e2e).
+- Fake timers (`vi.useFakeTimers()`) need `userEvent.setup({ advanceTimers: vi.advanceTimersByTime })`, or user-event's internal delays hang.
+- Don't chase **100% coverage**. Coverage tells you what code ran, not whether it was checked. Aim for confidence in critical paths.
+</Callout>
+
+## Interview questions
+
+<QA q="What does 'test behavior, not implementation' mean in practice?" level="junior">
+
+Assert on what a user can observe (text on screen, which buttons are enabled, what was submitted to the API) rather than internal state, private functions, or component structure. For example, check that 'Count: 1' appears after clicking, not that `setCount` was called. Behavior tests survive refactors (switching `useState` to `useReducer`, splitting components) and fail only when the user-visible result breaks.
+
+</QA>
+
+<QA q="Why prefer getByRole over getByTestId?" level="junior">
+
+`getByRole` finds elements the way assistive technology does, by their role and accessible name, so the test reflects real usage and also fails if the element isn't accessible (a `div` with `onClick` has no button role). Test ids are invisible to users and pass even when the UI is unusable. `getByTestId` is a last resort for elements with no meaningful role or text.
+
+</QA>
+
+<QA q="What is the difference between getBy, queryBy and findBy?" level="junior">
+
+`getBy` returns the element synchronously and throws if it is missing (or if there are several). `queryBy` returns `null` instead of throwing, so it is the one to use when asserting that something is **not** rendered. `findBy` returns a promise that retries until the element appears or a timeout passes (1 second by default); use it for anything that appears after async work. Each also has an `All` variant that returns arrays.
+
+</QA>
+
+<QA q="Why use user-event instead of fireEvent?" level="mid">
+
+`fireEvent.click` dispatches a single DOM event. `user.click` simulates the whole interaction: pointer and mouse events, focus changes, and it refuses to click elements that are disabled or hidden by `pointer-events: none`. `user.type` fires keydown, input and keyup for every character, so controlled inputs, masks and key handlers behave like they do in a browser. In user-event 14 you call `userEvent.setup()` per test and `await` every interaction.
+
+</QA>
+
+<QA q="How do you mock API calls in component tests, and why is MSW recommended?" level="mid">
+
+MSW intercepts requests at the network layer, so the component uses its real data-fetching code and you define responses with handlers such as `http.get('/api/user', () => HttpResponse.json(user))`. You start a server in the setup file, override handlers per test with `server.use(...)` for errors or edge cases, and reset them after each test. Compared to mocking `fetch` or a module directly, tests aren't coupled to which client or URL-building code you use, and the handlers can be reused in Storybook and development.
+
+</QA>
+
+<QA q="How do you test a custom hook?" level="mid">
+
+Use `renderHook` from `@testing-library/react`, which renders a tiny test component that calls the hook and exposes the latest return value as `result.current`. Wrap updates that change state in `act(...)`, and pass a `wrapper` option when the hook needs providers. If the hook is only used by one component, it is often better to test it through that component. If its logic is complex, extract that logic into a pure function or reducer and unit test it directly.
+
+</QA>
+
+<QA q="When does vi.mock make sense and what are the risks?" level="senior">
+
+It makes sense for boundaries outside your control or with side effects: analytics, payment SDKs, `next/navigation`, date or random sources. `vi.mock` calls are hoisted to the top of the file, so factory functions can't reference variables declared normally in the test (use `vi.hoisted` for that). The risk is over-mocking: if you mock your own child components or utilities, the test only proves that your mocks agree with each other, and real integration bugs slip through.
+
+</QA>
+
+<QA q="A test passes locally but fails in CI. How do you debug it?" level="senior">
+
+First reproduce with the CI command (`vitest run`, same Node version, `CI=true`), and run the single test in isolation versus with the whole suite to detect **state leaking** between tests (unreset MSW handlers, a shared QueryClient, module-level caches, mocks not cleared). Look for **timing** assumptions: missing `await`, `getBy` where `findBy` is needed, real timers or `Date.now()`, and slower CI machines hitting the default timeout. Also check environment differences: timezone and locale (date formatting), environment variables, and test order. `screen.debug()` and running with `--sequence.shuffle` help expose order-dependent tests.
+
+</QA>
+
+<QA q="Your team snapshots every component. What would you change?" level="senior">
+
+Large snapshots fail on any markup or class change, so people update them with `-u` without reading the diff and they stop catching bugs. I'd replace most of them with explicit assertions on behavior (roles, text, enabled state, calls to callbacks) and keep snapshots only for small, stable outputs such as a serialized object or an error message. Visual regressions are better caught with screenshot tests in a real browser (Playwright `toHaveScreenshot`) than with DOM snapshots.
+
+</QA>

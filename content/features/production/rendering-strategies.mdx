@@ -1,0 +1,271 @@
+---
+title: "Rendering Strategies: CSR, SSR, SSG, ISR & Streaming"
+summary: Choose when and where each page is rendered (build time, request time, or in the browser) to balance speed, SEO, freshness and cost in the Next.js App Router.
+category: production
+order: 6
+difficulty: intermediate
+tags: [ssr, ssg, isr, csr, streaming, nextjs, performance, seo]
+technologies: [Next.js App Router, generateStaticParams, revalidate, loading.tsx, Suspense, cookies(), headers()]
+updated: 2026-11-09
+---
+
+## What it is
+
+A rendering strategy answers: **when is the HTML for this page produced, and where?** The choice drives Time To First Byte (TTFB), SEO, data freshness and hosting cost.
+
+| Strategy | HTML produced | Good for | Trade-off |
+| --- | --- | --- | --- |
+| **CSR** (Client-Side Rendering) | In the browser, after JS loads and fetches data | Logged-in, highly interactive apps | Empty HTML first, slower first paint, weak SEO |
+| **SSR** (Server-Side Rendering, dynamic) | On the server, **per request** | Personalized or always-fresh pages | Server work on every request, TTFB depends on data speed |
+| **SSG** (Static Site Generation) | At **build time**, served from a CDN | Marketing pages, docs, blogs | Stale until the next build |
+| **ISR** (Incremental Static Regeneration) | Static, then **regenerated** in the background after a time or on demand | Product pages, blogs with a CMS | Some users see slightly stale content |
+| **Streaming** | Server sends the shell immediately, then streams slow parts as they resolve | Pages mixing fast and slow data | Needs Suspense boundaries and good loading UI |
+
+How these map to the **Next.js 15 App Router**:
+
+- Routes are **static by default** (prerendered at build time, like SSG) unless they use something only known at request time.
+- Using a **dynamic API** opts the route into dynamic rendering (SSR): `await cookies()`, `await headers()`, `await connection()`, reading `searchParams`, or a `fetch` with `cache: "no-store"`.
+- `export const revalidate = 60` in a page or layout makes it ISR: static, refreshed at most every 60 seconds. `revalidatePath` / `revalidateTag` give on-demand ISR.
+- `generateStaticParams` prerenders dynamic routes like `/blog/[slug]` at build time.
+- `export const dynamic = "force-dynamic"` forces per-request rendering; `"force-static"` forces static.
+- **Next.js 15 change**: `fetch` responses are **not cached by default** anymore (in 14 they were). Opt in with `cache: "force-cache"` or `next: { revalidate }`. A route without dynamic APIs can still be prerendered at build time.
+- CSR still exists: a Client Component that fetches in the browser (ideally with [TanStack Query](/production/tanstack-query)).
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// app/blog/[slug]/page.tsx
+export const dynamic = "force-dynamic"; // ❌ blog posts rendered on EVERY request
+
+export default async function PostPage({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params;
+  // ❌ In Next.js 15 this fetch is uncached, so the CMS is hit on every request
+  const post = await fetch(`https://cms.example.com/posts/${slug}`).then((r) => r.json());
+  return <Article post={post} />;
+}
+```
+
+```tsx
+// app/layout.tsx
+import { cookies } from "next/headers";
+
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  // ❌ Reading cookies in the ROOT layout makes every route dynamic
+  const theme = (await cookies()).get("theme")?.value ?? "light";
+  return (
+    <html data-theme={theme}>
+      <body>{children}</body>
+    </html>
+  );
+}
+```
+
+</Tab>
+<Tab label="Correct (SSG + ISR)">
+
+```tsx
+// app/blog/[slug]/page.tsx
+import { notFound } from "next/navigation";
+
+export const revalidate = 3600; // ✅ ISR: regenerate at most once per hour
+
+// ✅ Prerender known posts at build time; new slugs render on first request, then cache
+export async function generateStaticParams() {
+  const posts: { slug: string }[] = await fetch("https://cms.example.com/posts").then((r) =>
+    r.json(),
+  );
+  return posts.map((p) => ({ slug: p.slug }));
+}
+
+export default async function PostPage({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params;
+  const res = await fetch(`https://cms.example.com/posts/${slug}`, {
+    next: { tags: [`post:${slug}`] }, // ✅ on-demand refresh via revalidateTag on CMS webhook
+  });
+  if (!res.ok) notFound();
+  return <Article post={await res.json()} />;
+}
+```
+
+</Tab>
+<Tab label="Correct (dynamic + streaming)">
+
+```tsx
+// app/dashboard/page.tsx
+import { Suspense } from "react";
+import { cookies } from "next/headers";
+
+// Personalized → dynamic is correct here (cookies() opts in automatically)
+export default async function DashboardPage() {
+  const team = (await cookies()).get("team")?.value ?? "default";
+
+  return (
+    <>
+      <DashboardHeader team={team} /> {/* fast: sent immediately */}
+      <Suspense fallback={<ChartSkeleton />}>
+        <RevenueChart team={team} /> {/* slow query: streamed in when ready */}
+      </Suspense>
+      <Suspense fallback={<TableSkeleton />}>
+        <RecentOrders team={team} />
+      </Suspense>
+    </>
+  );
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why static-first is the right default">
+- A static or ISR page is served from a CDN edge in milliseconds; TTFB doesn't depend on your database at all.
+- Fewer server renders means lower cost and no load spikes on the database during traffic peaks.
+- ISR plus on-demand revalidation gives near-real-time freshness for content that changes on edits, not per request.
+- When you do need per-request rendering, **streaming** sends the shell and fast content first, so slow queries don't block the whole page.
+</Callout>
+
+## How to use
+
+1. For each route, ask: is it the same for every visitor? How stale may it be? Does it need SEO?
+2. **Same for everyone, rarely changes** → leave it static (SSG). Use `generateStaticParams` for dynamic segments.
+3. **Same for everyone, changes over time** → ISR with `export const revalidate = N`, plus `revalidateTag` / `revalidatePath` from a [Server Action](/production/server-actions) or CMS webhook.
+4. **Personalized or must be fresh per request** → dynamic rendering. Using `cookies()`, `headers()` or `searchParams` opts in automatically; add `dynamic = "force-dynamic"` only when Next.js can't detect it.
+5. Keep dynamic APIs **as deep in the tree as possible** (not in the root layout) so the rest stays static.
+6. Add `loading.tsx` for an instant route-level skeleton, and wrap independent slow sections in `Suspense` so they stream (see [Suspense](/fundamentals/suspense)).
+7. Be explicit about fetch caching in Next.js 15: `cache: "force-cache"` or `next: { revalidate, tags }` when you want caching (see [API Caching](/backend/api-caching)).
+8. Check the build output: it marks each route as static or dynamic, so you can catch routes that accidentally became dynamic.
+
+<Callout type="info" title="Next.js 16: Cache Components">
+Next.js 16 introduces **Cache Components**: the `"use cache"` directive marks functions or components as cacheable, and dynamic rendering becomes the default with explicit opt-in caching (building on Partial Prerendering). The concepts on this page still apply; the configuration API differs, so check the version you're on.
+</Callout>
+
+## Use-case demos
+
+### Use case 1: blog with on-demand revalidation from a CMS webhook
+
+```ts
+// app/api/revalidate/route.ts
+import { revalidateTag } from "next/cache";
+
+export async function POST(req: Request) {
+  if (req.headers.get("x-webhook-secret") !== process.env.CMS_WEBHOOK_SECRET) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  const { slug } = (await req.json()) as { slug: string };
+  revalidateTag(`post:${slug}`); // ✅ next visitor gets the fresh post, no full rebuild
+  return Response.json({ revalidated: true });
+}
+```
+
+### Use case 2: dashboard route with loading.tsx
+
+```tsx
+// app/dashboard/loading.tsx
+// ✅ Shown instantly on navigation while page.tsx's async work runs
+export default function Loading() {
+  return <div className="h-64 animate-pulse rounded-xl bg-zinc-100" />;
+}
+```
+
+```tsx
+// app/dashboard/revenue-chart.tsx  (async Server Component)
+import { getRevenue } from "@/server/analytics";
+import { Chart } from "./chart"; // "use client"
+
+export async function RevenueChart({ team }: { team: string }) {
+  const data = await getRevenue(team); // 2 s query: only this section waits
+  return <Chart data={data} />;
+}
+```
+
+### Use case 3: product catalog with searchParams (dynamic) and a static detail page
+
+```tsx
+// app/products/page.tsx: reading searchParams makes this route dynamic
+export default async function ProductsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string; page?: string }>;
+}) {
+  const { q = "", page = "1" } = await searchParams;
+  const products = await searchProducts({ q, page: Number(page) });
+  return <ProductGrid products={products} />;
+}
+```
+
+```tsx
+// app/products/[id]/page.tsx: static detail pages refreshed every 10 minutes
+export const revalidate = 600;
+
+export default async function ProductPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const product = await getProduct(id);
+  return <ProductDetails product={product} />;
+}
+```
+
+See [Server-side Filtering & Pagination](/backend/server-filtering-pagination) for the search side.
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- One `cookies()` or `headers()` call in a **layout** makes every route below it dynamic. Read them in the leaf that needs them.
+- Never statically render or ISR-cache **personalized** content: one user's page could be served to others.
+- Next.js 15 doesn't cache `fetch` by default; code written for Next.js 14 may suddenly hit your API on every request (or vice versa after upgrading).
+- `force-dynamic` as a "fix" for stale data throws away caching for the whole route. Prefer `revalidateTag` after writes.
+- `generateStaticParams` for 100,000 pages can make builds very slow; prerender the popular subset and let the rest render on demand.
+- Streaming needs meaningful fallbacks; a page full of spinners is worse than one well-placed skeleton.
+- Pure CSR is still fine behind a login where SEO doesn't matter, but you lose fast first paint and add client waterfalls.
+</Callout>
+
+## Interview questions
+
+<QA q="Explain SSR vs SSG vs ISR." level="junior">
+
+**SSG** renders pages to HTML at build time and serves them from a CDN: fastest, but the content is fixed until the next build. **SSR** renders on the server on every request: always fresh and can be personalized, but costs server time and TTFB depends on data speed. **ISR** is SSG that regenerates pages in the background after a revalidation interval or on demand, so you get static speed with eventual freshness. Pick SSG for rarely changing content, ISR for shared content that changes, and SSR for personalized or real-time pages.
+
+</QA>
+
+<QA q="What makes a route dynamic in the Next.js 15 App Router?" level="mid">
+
+Routes are static by default. They become dynamic when they use request-time information: `cookies()`, `headers()`, `connection()`, `searchParams` in a page, a `fetch` with `cache: 'no-store'`, or segment config like `dynamic = 'force-dynamic'`. Any of these in a layout affects all routes below it. The build output shows which routes ended up static or dynamic.
+
+</QA>
+
+<QA q="What changed about fetch caching in Next.js 15 compared to 14?" level="mid">
+
+In Next.js 14, `fetch` in Server Components was cached by default (`force-cache`). In Next.js 15 it's not cached by default, so you opt in with `cache: 'force-cache'` or `next: { revalidate, tags }`. GET Route Handlers and the client router cache for page segments also stopped caching by default. The route itself can still be prerendered at build time if it uses no dynamic APIs.
+
+</QA>
+
+<QA q="How does streaming work with loading.tsx and Suspense?" level="mid">
+
+The server sends HTML in chunks: it renders everything outside Suspense boundaries, sends that with the fallbacks, and keeps the connection open. As each suspended async Server Component resolves, React streams its HTML plus a small script that swaps it into place. `loading.tsx` is shorthand for a Suspense boundary around the route's page, giving an instant skeleton on navigation. It improves time to first byte and first paint without waiting for the slowest query.
+
+</QA>
+
+<QA q="Your product page is slow because it's rendered on every request. How do you fix it?" level="senior">
+
+First find out why it's dynamic: a `cookies()` or `headers()` call (possibly in a layout), `force-dynamic`, or uncached fetches. If the content is the same for everyone, make it ISR with `revalidate` and tag the data fetches so a Server Action or webhook can call `revalidateTag` when the product changes. Move personalized bits (cart count, recommendations) into small client components or a separate Suspense-wrapped section. Prerender the popular products with `generateStaticParams`.
+
+</QA>
+
+<QA q="When would you still choose client-side rendering?" level="mid">
+
+For highly interactive, authenticated surfaces where SEO doesn't matter and data changes constantly from user actions: dashboards with live filters, editors, chat. A server-rendered shell with client-side data fetching (TanStack Query) gives caching, background refetching and optimistic updates. Even then, you typically render the layout and initial data on the server and use CSR for the parts that change in place.
+
+</QA>
+
+<QA q="What's the trade-off between time-based ISR and on-demand revalidation?" level="senior">
+
+Time-based ISR (`revalidate = 60`) is simple and self-healing, but content can be stale for up to the interval and pages regenerate even when nothing changed. On-demand revalidation via `revalidateTag` or `revalidatePath` updates immediately after a change and avoids useless regeneration, but every write path (admin actions, CMS webhooks) must trigger it. Many apps combine both: on-demand for freshness plus a long interval as a safety net.
+
+</QA>
+
+<QA q="Why is reading cookies in the root layout a performance problem?" level="mid">
+
+Calling a dynamic API in a layout opts that layout and every route beneath it into dynamic rendering, so pages that could have been static and served from a CDN are rendered on every request. Move the cookie read into the specific component that needs it, wrap it in Suspense, or handle it on the client. The same applies to `headers()` and auth checks done in the root layout.
+
+</QA>

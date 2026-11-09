@@ -1,0 +1,400 @@
+---
+title: Error Handling & Monitoring
+summary: Handle errors in layers, show users helpful messages, and send detailed but safe reports to a monitoring service like Sentry.
+category: production
+order: 8
+difficulty: advanced
+tags: [errors, monitoring, sentry, error-boundary, nextjs, observability, logging]
+technologies: [react-error-boundary, Next.js error.tsx, global-error.tsx, not-found.tsx, "@sentry/nextjs", TypeScript]
+updated: 2026-11-09
+---
+
+## What it is
+
+In production, errors **will** happen: flaky networks, expired sessions, bad deploys, unexpected API responses. Good error handling has two audiences:
+
+- **Users** need a short, honest message and a way forward ("Couldn't save. Try again."), and the rest of the app should keep working.
+- **Developers** need the full story: stack trace mapped to original source, which release, which user (by id, not email), what happened just before. Without monitoring you only learn about bugs when users complain, if they bother.
+
+Errors are handled in **layers**, each catching what the previous one can't:
+
+| Layer | Catches | Tool |
+| --- | --- | --- |
+| **try/catch** | Errors in event handlers and async code (fetch, mutations) | `try/catch`, TanStack Query `isError`, mutation `onError` |
+| **Typed API errors** | Expected failures: validation, 401, 404, 409 conflicts | custom error classes or a `Result` type |
+| **Error boundaries** | Unexpected errors thrown while **rendering** a subtree | [Error Boundaries](/fundamentals/error-boundaries), `react-error-boundary` |
+| **Route boundaries** | Render/data errors in a route segment, missing resources | Next.js `error.tsx`, `not-found.tsx`, `global-error.tsx` |
+| **Monitoring** | Everything above, reported centrally with context | Sentry (`@sentry/nextjs`), Datadog, etc. |
+
+The key distinction: **expected** errors (wrong password, item out of stock, 404) are part of normal UI flow and should be returned and rendered as state. **Unexpected** errors (bugs, outages) should be thrown, caught by a boundary, and reported.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ Swallows errors, leaks internals, logs secrets, nothing reaches monitoring
+async function saveProfile(data: ProfileInput) {
+  try {
+    const res = await fetch("/api/profile", { method: "PUT", body: JSON.stringify(data) });
+    return await res.json(); // 500 HTML page → JSON parse error, or error body treated as success
+  } catch (e) {
+    console.log("error", e, data, document.cookie); // PII + session cookie in logs
+  }
+}
+
+function ProfileForm() {
+  const [error, setError] = useState("");
+  const onSubmit = async (data: ProfileInput) => {
+    try {
+      await saveProfile(data);
+    } catch (e: any) {
+      setError(e.message); // "relation users_email_key violates unique constraint" shown to users
+    }
+  };
+  // ...
+}
+
+// app/api/profile/route.ts
+export async function PUT(req: Request) {
+  try {
+    /* ... */
+  } catch (e: any) {
+    return Response.json({ error: e.stack }, { status: 500 }); // stack trace sent to the browser
+  }
+}
+```
+
+</Tab>
+<Tab label="Correct: typed errors">
+
+```ts
+// lib/errors.ts: one vocabulary for expected failures
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: "VALIDATION" | "UNAUTHORIZED" | "NOT_FOUND" | "CONFLICT" | "UNKNOWN",
+    public readonly userMessage: string, // safe to show
+    options?: { cause?: unknown },
+  ) {
+    super(`${code} (${status})`, options);
+    this.name = "ApiError";
+  }
+}
+
+// lib/api.ts: every request goes through here
+export async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...init?.headers },
+  });
+  if (res.ok) return res.json() as Promise<T>;
+
+  const body = await res.json().catch(() => null); // body may not be JSON
+  const code = body?.code ?? "UNKNOWN";
+  const userMessage =
+    res.status === 401 ? "Your session expired. Please sign in again."
+    : res.status === 409 ? body?.message ?? "This was changed by someone else."
+    : res.status >= 500 ? "Something went wrong on our side. Please try again."
+    : body?.message ?? "Request failed.";
+  throw new ApiError(res.status, code, userMessage);
+}
+
+// component: show the safe message, report only the unexpected
+import * as Sentry from "@sentry/nextjs";
+
+async function onSubmit(data: ProfileInput) {
+  try {
+    await apiFetch("/api/profile", { method: "PUT", body: JSON.stringify(data) });
+    toast.success("Profile saved");
+  } catch (error) {
+    if (error instanceof ApiError && error.status < 500) {
+      toast.error(error.userMessage); // expected: no need to page anyone
+      return;
+    }
+    Sentry.captureException(error, { tags: { feature: "profile" } }); // unexpected
+    toast.error("Couldn't save your profile. Please try again.");
+  }
+}
+```
+
+</Tab>
+<Tab label="Correct: Result pattern">
+
+```ts
+// For server code (Server Actions, services) where errors are expected outcomes
+type Result<T, E = { code: string; message: string }> =
+  | { ok: true; data: T }
+  | { ok: false; error: E };
+
+// app/cart/actions.ts
+"use server";
+
+export async function addToCart(productId: string, qty: number): Promise<Result<Cart>> {
+  const product = await db.product.findUnique({ where: { id: productId } });
+  if (!product) return { ok: false, error: { code: "NOT_FOUND", message: "Product not found" } };
+  if (product.stock < qty) {
+    return { ok: false, error: { code: "OUT_OF_STOCK", message: `Only ${product.stock} left` } };
+  }
+  // Unexpected failures (DB down) are NOT caught here: they throw, reach
+  // error.tsx and are reported to Sentry automatically.
+  const cart = await db.cart.addItem(productId, qty);
+  return { ok: true, data: cart };
+}
+
+// client
+const result = await addToCart(product.id, 1);
+if (!result.ok) setMessage(result.error.message); // TypeScript forces you to handle it
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why layering errors works">
+- **Expected vs unexpected**: typed errors and `Result` values make expected failures explicit in the types, so the UI handles them deliberately; only real bugs and outages reach boundaries and alerting, which keeps alerts meaningful.
+- **Safe messages**: users see a `userMessage` written for them, never stack traces, SQL or internal ids. Details go to monitoring, where only your team can see them.
+- **Containment**: boundaries around routes and widgets turn a crash into a small fallback instead of a blank page.
+- **Fast diagnosis**: Sentry groups identical errors, maps minified stacks back to source with source maps, and shows the release, browser and breadcrumbs (clicks, navigations, requests) that led to the error.
+</Callout>
+
+## How to use
+
+1. **Wrap async work** in `try/catch` (or rely on TanStack Query's `isError` / mutation `onError`). Always check `res.ok`, since `fetch` only rejects on network failure.
+2. **Define a small error vocabulary**: an `ApiError` class (with `status`, `code`, `userMessage`) for client calls, and a `Result` type for Server Actions where failures are expected outcomes. Use `cause` to keep the original error.
+3. **Add boundaries**: a granular `react-error-boundary` around independent widgets, `error.tsx` per important route segment, `global-error.tsx` for root layout failures, and `not-found.tsx` with `notFound()` for missing resources.
+4. **Install Sentry** with the wizard, which creates the config files and wraps `next.config`:
+
+   ```bash
+   npx @sentry/wizard@latest -i nextjs
+   # or manually:
+   npm install @sentry/nextjs
+   ```
+
+5. The setup (exact file names depend on SDK version) consists of: client init (`instrumentation-client.ts`), server and edge init (`sentry.server.config.ts`, `sentry.edge.config.ts`) loaded from `instrumentation.ts`, and `withSentryConfig` in `next.config.ts` for source map upload.
+6. **Upload source maps** at build time with a `SENTRY_AUTH_TOKEN` (a CI secret, never committed), and don't serve them publicly.
+7. **Tag releases** (usually the git commit SHA, which the build plugin can detect) so you know which deploy introduced an error and can mark issues as resolved in a release.
+8. **Scrub data**: keep `sendDefaultPii` off unless you've decided otherwise, set the user by **id only**, and strip tokens/emails in `beforeSend`.
+9. Set up **alerts** for new issues and error-rate spikes, and review them after each deploy.
+
+## Use-case demos
+
+### Use case 1: Next.js route error UI that reports to Sentry
+
+```tsx
+// app/dashboard/error.tsx
+"use client";
+
+import * as Sentry from "@sentry/nextjs";
+import { useEffect } from "react";
+
+export default function DashboardError({
+  error,
+  reset,
+}: {
+  error: Error & { digest?: string };
+  reset: () => void;
+}) {
+  useEffect(() => {
+    Sentry.captureException(error); // digest links it to the server-side log entry
+  }, [error]);
+
+  return (
+    <div role="alert" className="p-6">
+      <h2>We couldn't load your dashboard.</h2>
+      <p>Our team has been notified.</p>
+      <button onClick={() => reset()}>Try again</button>
+    </div>
+  );
+}
+```
+
+```tsx
+// app/global-error.tsx: replaces the root layout, so it must render html and body
+"use client";
+
+import * as Sentry from "@sentry/nextjs";
+import { useEffect } from "react";
+
+export default function GlobalError({ error }: { error: Error & { digest?: string } }) {
+  useEffect(() => {
+    Sentry.captureException(error);
+  }, [error]);
+
+  return (
+    <html lang="en">
+      <body>
+        <h1>Something went wrong</h1>
+        <a href="/">Go to the homepage</a>
+      </body>
+    </html>
+  );
+}
+```
+
+```tsx
+// app/products/[id]/page.tsx: a missing product is expected, not an error
+import { notFound } from "next/navigation";
+
+export default async function ProductPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const product = await getProduct(id);
+  if (!product) notFound(); // renders the nearest not-found.tsx with a 404 status
+  return <ProductDetails product={product} />;
+}
+```
+
+In production, Next.js replaces the message of errors thrown in Server Components with a generic one and adds a `digest`, so secrets in error messages never reach the browser. Match the digest to the server log or Sentry event.
+
+### Use case 2: Sentry configuration with privacy and context
+
+```ts
+// instrumentation-client.ts (client init)
+import * as Sentry from "@sentry/nextjs";
+
+Sentry.init({
+  dsn: process.env.NEXT_PUBLIC_SENTRY_DSN, // DSN is public by design; auth token is not
+  environment: process.env.NEXT_PUBLIC_VERCEL_ENV ?? "development",
+  tracesSampleRate: 0.1, // performance tracing for 10% of transactions
+  sendDefaultPii: false, // don't attach IPs, cookies, request bodies by default
+  beforeSend(event) {
+    // Last line of defense: scrub anything that looks sensitive
+    if (event.request?.headers) delete event.request.headers["authorization"];
+    if (event.user) event.user = { id: event.user.id }; // keep id, drop email/name
+    return event; // return null to drop the event entirely
+  },
+});
+```
+
+```ts
+// instrumentation.ts (server): load server/edge config and capture request errors
+import * as Sentry from "@sentry/nextjs";
+
+export async function register() {
+  if (process.env.NEXT_RUNTIME === "nodejs") await import("./sentry.server.config");
+  if (process.env.NEXT_RUNTIME === "edge") await import("./sentry.edge.config");
+}
+
+export const onRequestError = Sentry.captureRequestError; // errors in RSC, route handlers, actions
+```
+
+```ts
+// next.config.ts: upload source maps on build, keep them off the public server
+import { withSentryConfig } from "@sentry/nextjs";
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {};
+
+export default withSentryConfig(nextConfig, {
+  org: "my-org",
+  project: "storefront",
+  authToken: process.env.SENTRY_AUTH_TOKEN, // CI secret
+  silent: !process.env.CI,
+});
+```
+
+### Use case 3: context and breadcrumbs around a checkout
+
+```ts
+import * as Sentry from "@sentry/nextjs";
+
+// after login
+Sentry.setUser({ id: user.id }); // id only, no email
+// on logout
+Sentry.setUser(null);
+
+async function checkout(cart: Cart) {
+  Sentry.addBreadcrumb({
+    category: "checkout",
+    message: `Checkout started with ${cart.items.length} items`, // counts, not card data
+    level: "info",
+  });
+
+  try {
+    const order = await apiFetch<Order>("/api/checkout", {
+      method: "POST",
+      body: JSON.stringify({ cartId: cart.id }),
+    });
+    return order;
+  } catch (error) {
+    if (error instanceof ApiError && error.code === "CONFLICT") throw error; // expected
+    Sentry.captureException(error, {
+      tags: { feature: "checkout", paymentProvider: "stripe" }, // searchable
+      extra: { cartId: cart.id, itemCount: cart.items.length }, // debugging context
+    });
+    throw error;
+  }
+}
+```
+
+Sentry records many breadcrumbs automatically (navigation, clicks, console, fetch requests), so when the checkout error arrives you see the steps that led to it.
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Never log secrets or PII**: passwords, tokens, cookies, full card numbers, emails, addresses. Log ids and counts. Use `beforeSend` and Sentry's server-side scrubbing as backstops, not as your only protection.
+- **Don't swallow errors** with an empty `catch`. Either handle it (show UI, retry, fallback) or rethrow / report it.
+- **Don't show raw `error.message`** to users. Messages from libraries and databases are for developers and can leak internals.
+- **Don't report expected errors** (validation, 404, wrong password) as exceptions; they create noise and hide real problems. Track them as metrics if you care.
+- **Boundaries don't catch** event handler or async errors. Use `try/catch`, or forward with `showBoundary` from `react-error-boundary`.
+- `error.tsx` doesn't catch errors in the `layout.tsx` of the same segment; `global-error.tsx` only shows in production builds and must include `html` and `body`.
+- **Source maps**: upload them to Sentry but don't publish them on your site, and keep `SENTRY_AUTH_TOKEN` out of the client bundle (no `NEXT_PUBLIC_` prefix).
+- Be careful with **sampling and quotas**: 100% tracing on a busy site gets expensive; sample traces, keep errors at full rate.
+- **Retrying non-idempotent requests** (like "place order") after an error can double-charge. Retry only safe operations or use idempotency keys.
+</Callout>
+
+## Interview questions
+
+<QA q="What are the layers of error handling in a React and Next.js app?" level="mid">
+
+`try/catch` (or query/mutation error states) for event handlers and async calls; typed errors or `Result` values for expected failures from APIs and Server Actions; error boundaries for unexpected render errors in a subtree; Next.js `error.tsx`, `global-error.tsx` and `not-found.tsx` at the route level; and a monitoring service like Sentry that receives reports from all of them. Each layer catches what the one before it can't, so one failure degrades a small part of the UI and still gets reported.
+
+</QA>
+
+<QA q="What is the difference between expected and unexpected errors, and why does it matter?" level="mid">
+
+Expected errors are normal outcomes: validation failures, 401s, 404s, out-of-stock, conflicts. They should be returned as values (or typed errors) and rendered as helpful UI, and usually not reported as exceptions. Unexpected errors are bugs or outages: they should be thrown, caught by boundaries, shown with a generic message, and reported with full context. Mixing them up produces either noisy alerts or silent failures.
+
+</QA>
+
+<QA q="Why can't an error boundary catch an error from a failed fetch in onClick?" level="junior">
+
+Error boundaries only catch errors that happen while React renders, runs lifecycle methods or effects. An event handler runs later, outside rendering, so its errors propagate to the browser instead. You handle them with `try/catch` and error state, or forward them to the nearest boundary with `showBoundary` from `react-error-boundary`. See [Error Boundaries](/fundamentals/error-boundaries).
+
+</QA>
+
+<QA q="How do error.tsx, global-error.tsx and not-found.tsx differ in Next.js?" level="mid">
+
+`error.tsx` is a Client Component that Next.js wraps around a route segment as an error boundary; it receives `error` and `reset`. `global-error.tsx` catches errors in the root layout itself, replaces the whole document, and therefore must render its own `html` and `body`. `not-found.tsx` renders when `notFound()` is called or a route doesn't match, with a 404 status; it's for expected missing resources, not crashes.
+
+</QA>
+
+<QA q="What should you show the user vs what should you log?" level="junior">
+
+Show a short, actionable message in plain language ('Couldn't save. Try again.'), with a retry or way back, and never stack traces, SQL errors or internal ids. Log the full error, stack, release, route, user id and relevant non-sensitive context (counts, feature, ids). The user message helps them continue; the log helps you fix the bug.
+
+</QA>
+
+<QA q="How do you avoid leaking secrets and PII into logs and monitoring?" level="senior">
+
+Log identifiers instead of personal data (user id, order id), never log request bodies, headers, cookies or tokens wholesale, and keep `sendDefaultPii` off in Sentry. Add a `beforeSend` hook that strips sensitive fields, and enable server-side data scrubbing as a backstop. Keep secrets like `SENTRY_AUTH_TOKEN` server-only. In Next.js, production Server Component errors are sent to the client with a generic message and a digest, so don't defeat that by returning raw messages from your own API routes.
+
+</QA>
+
+<QA q="Why are source maps and release tracking important in Sentry?" level="mid">
+
+Production JavaScript is minified, so a raw stack trace points at `a.js:1:48213`. Uploading source maps at build time lets Sentry show the original file, line and code. Tagging each event with a release (usually the commit SHA) tells you which deploy introduced an error, lets you see regressions, and lets you mark issues resolved in a specific release. Source maps should be uploaded privately, not served publicly.
+
+</QA>
+
+<QA q="After a deploy, users report a blank white page on the dashboard. How do you investigate and prevent it?" level="senior">
+
+Check Sentry for new issues in the latest release, filtered by the dashboard route, and use the de-minified stack trace and breadcrumbs to find the cause; roll back if it's widespread. A blank page means an uncaught render error with no boundary in that part of the tree, so add `error.tsx` for the route and granular boundaries around widgets so one failure shows a fallback instead. Add a test that reproduces the failing data, and alert on error-rate spikes per release so the next one is caught before users report it.
+
+</QA>
+
+<QA q="Custom error classes or a Result type: which would you use?" level="senior">
+
+Both have a place. A `Result` type makes failure part of the function signature, so TypeScript forces callers to handle it; it fits Server Actions and domain services where failures are expected and need to be serialized to the client. Custom error classes fit client data layers where throwing integrates with TanStack Query, boundaries and `try/catch`, and `instanceof` lets you branch on type. A common setup is `Result` for expected outcomes and thrown errors for unexpected ones.
+
+</QA>

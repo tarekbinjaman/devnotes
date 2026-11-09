@@ -1,0 +1,418 @@
+---
+title: Forms with React Hook Form + Zod
+summary: Build fast, type-safe forms by describing validation once in a Zod schema and letting React Hook Form manage field state.
+category: production
+order: 2
+difficulty: intermediate
+tags: [forms, validation, typescript, zod, accessibility, server-actions]
+technologies: [React Hook Form 7, Zod, zodResolver, useForm, Controller, useFieldArray]
+updated: 2026-11-09
+---
+
+## What it is
+
+Production forms need more than `value` + `onChange`: validation rules, error messages per field, touched/dirty tracking, async submit with a disabled button, server errors, dynamic rows, and types that match what the API expects. Writing that by hand with `useState` for every field is verbose and re-renders the whole form on every keystroke (see [Forms](/fundamentals/forms) for the controlled vs uncontrolled basics).
+
+- **React Hook Form (RHF)** manages form state with **uncontrolled inputs and refs**, so typing in one field doesn't re-render the whole form. It tracks errors, dirty/touched fields and submit state for you.
+- **Zod** describes the shape and rules of the data as a **schema**. `z.infer` turns that schema into a TypeScript type, so the type and the validation can never drift apart.
+- **`@hookform/resolvers`** connects them: `zodResolver(schema)` runs the schema on validation and maps Zod issues to field errors.
+
+The big production win: the **same schema** validates on the client (for instant feedback) and on the server (for security), because client validation can always be bypassed.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ useState per field, hand-written validation, types written separately
+function SignupForm() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const next: Record<string, string> = {};
+    if (!email.includes("@")) next.email = "Invalid email"; // weak, duplicated on the server
+    if (password.length < 8) next.password = "Too short";
+    setErrors(next);
+    if (Object.keys(next).length) return;
+    setSubmitting(true);
+    await fetch("/api/signup", { method: "POST", body: JSON.stringify({ email, password }) });
+    setSubmitting(false); // never reset if fetch throws
+  }
+
+  // Every keystroke re-renders the whole form; errors aren't announced to screen readers.
+  return (
+    <form onSubmit={handleSubmit}>
+      <input value={email} onChange={(e) => setEmail(e.target.value)} />
+      {errors.email && <span>{errors.email}</span>}
+      <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+      {errors.password && <span>{errors.password}</span>}
+      <button disabled={submitting}>Sign up</button>
+    </form>
+  );
+}
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// lib/schemas/signup.ts: shared by client and server
+import { z } from "zod";
+
+export const signupSchema = z
+  .object({
+    email: z.string().trim().email("Enter a valid email"),
+    password: z.string().min(8, "At least 8 characters"),
+    confirmPassword: z.string(),
+  })
+  .refine((d) => d.password === d.confirmPassword, {
+    message: "Passwords don't match",
+    path: ["confirmPassword"], // attach the error to this field
+  });
+
+export type SignupInput = z.infer<typeof signupSchema>; // ✅ type derived from schema
+
+// components/SignupForm.tsx
+"use client";
+
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+
+export function SignupForm() {
+  const {
+    register,
+    handleSubmit,
+    setError,
+    formState: { errors, isSubmitting },
+  } = useForm<SignupInput>({
+    resolver: zodResolver(signupSchema),
+    defaultValues: { email: "", password: "", confirmPassword: "" },
+  });
+
+  const onSubmit = async (data: SignupInput) => {
+    const res = await fetch("/api/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (res.status === 409) {
+      setError("email", { message: "This email is already registered" }); // server error → field
+      return;
+    }
+    if (!res.ok) setError("root", { message: "Something went wrong. Try again." });
+  };
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)} noValidate>
+      <label htmlFor="email">Email</label>
+      <input
+        id="email"
+        type="email"
+        autoComplete="email"
+        aria-invalid={errors.email ? "true" : "false"}
+        aria-describedby="email-error"
+        {...register("email")}
+      />
+      {errors.email && <p id="email-error" role="alert">{errors.email.message}</p>}
+
+      <label htmlFor="password">Password</label>
+      <input id="password" type="password" {...register("password")}
+        aria-invalid={errors.password ? "true" : "false"} />
+      {errors.password && <p role="alert">{errors.password.message}</p>}
+
+      <label htmlFor="confirmPassword">Confirm password</label>
+      <input id="confirmPassword" type="password" {...register("confirmPassword")}
+        aria-invalid={errors.confirmPassword ? "true" : "false"} />
+      {errors.confirmPassword && <p role="alert">{errors.confirmPassword.message}</p>}
+
+      {errors.root && <p role="alert">{errors.root.message}</p>}
+      <button type="submit" disabled={isSubmitting}>
+        {isSubmitting ? "Creating account…" : "Sign up"}
+      </button>
+    </form>
+  );
+}
+```
+
+</Tab>
+<Tab label="Controller (UI library)">
+
+```tsx
+// ✅ For components that don't expose a native input ref (selects, date pickers, sliders)
+import { Controller, useForm } from "react-hook-form";
+import { Select } from "@/components/ui/select"; // any controlled component
+
+const shippingSchema = z.object({
+  country: z.string().min(1, "Choose a country"),
+  express: z.boolean(),
+});
+type Shipping = z.infer<typeof shippingSchema>;
+
+function ShippingForm() {
+  const { control, register, handleSubmit } = useForm<Shipping>({
+    resolver: zodResolver(shippingSchema),
+    defaultValues: { country: "", express: false },
+  });
+
+  return (
+    <form onSubmit={handleSubmit(console.log)}>
+      <Controller
+        name="country"
+        control={control}
+        render={({ field, fieldState }) => (
+          <>
+            <Select
+              value={field.value}
+              onValueChange={field.onChange} // map the library's change event
+              onBlur={field.onBlur}
+              aria-invalid={fieldState.invalid}
+              options={countries}
+            />
+            {fieldState.error && <p role="alert">{fieldState.error.message}</p>}
+          </>
+        )}
+      />
+      <label>
+        <input type="checkbox" {...register("express")} /> Express delivery
+      </label>
+    </form>
+  );
+}
+```
+
+Native inputs like the checkbox still use `register`; only the library component needs `Controller`.
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's better">
+- **One source of truth**: the Zod schema defines the rules, the error messages and (via `z.infer`) the TypeScript type. Change it once and client, server and types all follow.
+- **Performance**: `register` wires native inputs through refs, so typing doesn't re-render the whole form; only components that read changed `formState` update.
+- **Correct submit state**: `handleSubmit` validates first, then awaits your async handler and keeps `isSubmitting` true until the promise settles, even if it throws.
+- **Accessibility**: `aria-invalid`, `aria-describedby` and `role="alert"` make errors visible to screen readers, and RHF focuses the first invalid field on submit.
+- **Server errors fit the same model**: `setError` puts a "email already taken" response on the right field or on `root`.
+</Callout>
+
+## How to use
+
+1. Install the three packages:
+
+   ```bash
+   npm install react-hook-form zod @hookform/resolvers
+   ```
+
+2. Write the schema in a shared file (for example `lib/schemas/`) and export `z.infer<typeof schema>` as the form type. Keep it free of client-only imports so the server can use it.
+3. Call `useForm` with `resolver: zodResolver(schema)` and **complete `defaultValues`** (empty strings, not `undefined`) so inputs start controlled-safe and `reset` works.
+4. Spread `register("field")` onto native inputs. Use `Controller` (or `useController`) for UI-library components that are controlled via `value` / `onChange`.
+5. Render `errors.field?.message`, set `aria-invalid`, and link messages with `aria-describedby`.
+6. Pass an `async` handler to `handleSubmit`; disable the button with `isSubmitting`. Map server errors with `setError`.
+7. Validate again on the server with `schema.safeParse(data)` before touching the database.
+8. Choose when to validate with the `mode` option: `onSubmit` (default), `onBlur`, `onTouched` or `onChange`. After the first submit, fields revalidate on change by default (`reValidateMode`).
+
+## Use-case demos
+
+### Use case 1: checkout form with server validation via a Server Action
+
+```ts
+// lib/schemas/checkout.ts
+import { z } from "zod";
+
+export const checkoutSchema = z.object({
+  fullName: z.string().trim().min(2, "Enter your full name"),
+  email: z.string().trim().email("Enter a valid email"),
+  postcode: z.string().trim().regex(/^[A-Z0-9 -]{3,10}$/i, "Invalid postcode"),
+  quantity: z.coerce.number().int().min(1).max(10), // coerce: inputs give strings
+});
+export type CheckoutInput = z.infer<typeof checkoutSchema>;
+```
+
+```ts
+// app/checkout/actions.ts
+"use server";
+
+import { checkoutSchema } from "@/lib/schemas/checkout";
+
+export async function placeOrder(input: unknown) {
+  const parsed = checkoutSchema.safeParse(input); // ✅ never trust the client
+  if (!parsed.success) {
+    return { ok: false as const, fieldErrors: parsed.error.flatten().fieldErrors };
+  }
+  const order = await db.order.create({ data: parsed.data });
+  return { ok: true as const, orderId: order.id };
+}
+```
+
+```tsx
+// app/checkout/CheckoutForm.tsx
+"use client";
+
+export function CheckoutForm() {
+  const form = useForm<CheckoutInput>({
+    resolver: zodResolver(checkoutSchema),
+    defaultValues: { fullName: "", email: "", postcode: "", quantity: 1 },
+  });
+
+  const onSubmit = async (data: CheckoutInput) => {
+    const result = await placeOrder(data);
+    if (!result.ok) {
+      for (const [field, messages] of Object.entries(result.fieldErrors)) {
+        form.setError(field as keyof CheckoutInput, { message: messages?.[0] });
+      }
+      return;
+    }
+    router.push(`/orders/${result.orderId}`);
+  };
+
+  return <form onSubmit={form.handleSubmit(onSubmit)}>{/* fields as above */}</form>;
+}
+```
+
+With `z.coerce`, the schema's input and output types differ. If TypeScript complains, type the form as `useForm<z.input<typeof checkoutSchema>, unknown, CheckoutInput>()` so the submit handler receives the parsed output, or use `register("quantity", { valueAsNumber: true })` with a plain `z.number()`.
+
+### Use case 2: dynamic invoice line items with useFieldArray
+
+```tsx
+import { useFieldArray, useForm } from "react-hook-form";
+
+const invoiceSchema = z.object({
+  customer: z.string().min(1, "Required"),
+  items: z
+    .array(
+      z.object({
+        description: z.string().min(1, "Required"),
+        amount: z.number().positive("Must be > 0"),
+      }),
+    )
+    .min(1, "Add at least one item"),
+});
+type Invoice = z.infer<typeof invoiceSchema>;
+
+function InvoiceForm() {
+  const { register, control, handleSubmit, formState: { errors } } = useForm<Invoice>({
+    resolver: zodResolver(invoiceSchema),
+    defaultValues: { customer: "", items: [{ description: "", amount: 0 }] },
+  });
+  const { fields, append, remove } = useFieldArray({ control, name: "items" });
+
+  return (
+    <form onSubmit={handleSubmit(saveInvoice)}>
+      <input {...register("customer")} placeholder="Customer" />
+      {fields.map((field, index) => (
+        <div key={field.id}> {/* ✅ field.id, not index, as the key */}
+          <input {...register(`items.${index}.description`)} />
+          <input type="number" step="0.01"
+            {...register(`items.${index}.amount`, { valueAsNumber: true })} />
+          {errors.items?.[index]?.amount && <p>{errors.items[index]?.amount?.message}</p>}
+          <button type="button" onClick={() => remove(index)}>Remove</button>
+        </div>
+      ))}
+      {errors.items?.root && <p>{errors.items.root.message}</p>}
+      <button type="button" onClick={() => append({ description: "", amount: 0 })}>
+        Add line
+      </button>
+      <button type="submit">Save</button>
+    </form>
+  );
+}
+```
+
+### Use case 3: edit profile form loaded from the API
+
+```tsx
+function EditProfile({ user }: { user: User }) {
+  const { register, handleSubmit, reset, formState: { isDirty, isSubmitting } } =
+    useForm<ProfileInput>({
+      resolver: zodResolver(profileSchema),
+      defaultValues: { name: user.name, bio: user.bio ?? "" },
+    });
+
+  const onSubmit = async (data: ProfileInput) => {
+    const saved = await api.updateProfile(data);
+    reset(saved); // ✅ new baseline: isDirty becomes false again
+  };
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)}>
+      <input {...register("name")} />
+      <textarea {...register("bio")} />
+      <button disabled={!isDirty || isSubmitting}>Save changes</button>
+    </form>
+  );
+}
+```
+
+If the data arrives after the first render (for example from TanStack Query), call `reset(data)` when it loads, or pass the `values` option so the form updates when the data changes.
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Client validation is UX, not security.** Always re-run `schema.safeParse` on the server.
+- **Missing `defaultValues`** leads to `undefined` fields, uncontrolled-to-controlled warnings and a broken `reset` / `isDirty`.
+- **Number inputs return strings.** Use `valueAsNumber: true` or `z.coerce.number()`, otherwise `z.number()` fails with "Expected number, received string".
+- **Using the array index as key** in `useFieldArray` breaks when rows are removed or reordered. Use `field.id`.
+- **Calling `watch()` with no arguments at the top of the form** subscribes to everything and re-renders on every keystroke. Watch specific fields or use `useWatch` in a child.
+- **`formState` is a proxy**: read the properties you need (destructure them) during render, or RHF won't track them.
+- For a two-field newsletter form, plain `useActionState` with a Server Action (and Zod on the server) may be enough. RHF pays off as forms get larger, dynamic, or need rich client validation.
+- Zod 4 is available and mostly compatible for these APIs, but some error-customization options changed. Check that your `@hookform/resolvers` version supports the Zod major you install.
+</Callout>
+
+## Interview questions
+
+<QA q="Why use React Hook Form instead of managing form state with useState?" level="junior">
+
+With `useState` per field you write a lot of boilerplate for values, errors, touched state and submit state, and every keystroke re-renders the whole form. React Hook Form registers native inputs through refs (uncontrolled), so typing doesn't re-render the form, and it gives you validation, error tracking, dirty state and `isSubmitting` out of the box. It scales much better to large and dynamic forms.
+
+</QA>
+
+<QA q="How does Zod fit together with React Hook Form?" level="junior">
+
+Zod defines the schema: field types, rules and messages. `zodResolver(schema)` from `@hookform/resolvers` plugs it into `useForm`, so validation runs through Zod and its issues become `formState.errors`. `z.infer<typeof schema>` produces the TypeScript type for the form values, so you never maintain a separate interface.
+
+</QA>
+
+<QA q="What is the difference between register and Controller?" level="mid">
+
+`register` returns `name`, `ref`, `onChange` and `onBlur` to spread on a native input; RHF reads the value from the DOM through the ref, which is fast and simple. `Controller` is for controlled components that don't expose a native input, like UI-library selects, date pickers or rich text editors: you render the component yourself and connect `field.value`, `field.onChange` and `field.onBlur`. Use `register` whenever you can and `Controller` when you must.
+
+</QA>
+
+<QA q="If you validate on the client, why validate on the server too?" level="junior">
+
+Anyone can bypass the browser by calling your API or Server Action directly, so client validation only improves UX. The server must validate every input before using it. Sharing one Zod schema means both sides apply exactly the same rules, and `safeParse` on the server gives you field errors you can send back and map with `setError`.
+
+</QA>
+
+<QA q="How do you show an error from the server, such as 'email already taken', on the right field?" level="mid">
+
+Inside the submit handler, inspect the response and call `setError('email', { message: '...' })`. For errors that don't belong to a field (network failure, 500), use `setError('root', ...)` or a `root.serverError` key and render it above the button. If the server returns Zod's flattened `fieldErrors`, loop over them and call `setError` for each.
+
+</QA>
+
+<QA q="How do you make form errors accessible?" level="mid">
+
+Associate every input with a `label`, set `aria-invalid` when the field has an error, and connect the message with `aria-describedby` pointing at the error element's id. Use `role='alert'` (or a live region) so new errors are announced. React Hook Form focuses the first invalid field on submit by default (`shouldFocusError`), which helps keyboard and screen reader users. See [Accessibility](/production/accessibility).
+
+</QA>
+
+<QA q="A number field always fails with 'Expected number, received string'. Why, and how do you fix it?" level="mid">
+
+HTML inputs always produce strings, even `type='number'`. Either register with `valueAsNumber: true` so RHF converts the value, or use `z.coerce.number()` in the schema. With coercion the schema's input type differs from its output type, so you may need the three-generic form of `useForm` with `z.input` and `z.infer` to keep TypeScript accurate.
+
+</QA>
+
+<QA q="How do you build a form with a dynamic list of rows?" level="senior">
+
+Use `useFieldArray` with the form's `control` and the array field name; it returns `fields` plus helpers like `append`, `remove`, `insert` and `move`. Render `fields.map` with `field.id` as the key (not the index) and register inputs as `items.${index}.description`. Validate the array in Zod with `z.array(...).min(1)`, and render array-level errors from `errors.items.root`.
+
+</QA>
+
+<QA q="When would you skip React Hook Form?" level="senior">
+
+For very small forms, such as a search box or a newsletter signup, a plain form with a Server Action and `useActionState` is simpler, works without JavaScript (progressive enhancement), and still validates with Zod on the server. RHF is worth it when you need instant client-side validation, many fields, dynamic rows, dirty tracking or tight integration with UI-library inputs. You can also combine them: RHF on the client calling a Server Action on submit.
+
+</QA>

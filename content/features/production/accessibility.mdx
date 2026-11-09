@@ -1,0 +1,363 @@
+---
+title: Accessibility (a11y) in React
+summary: Build React UIs that work with keyboards, screen readers and low vision by starting from semantic HTML and adding ARIA and focus management only where needed.
+category: production
+order: 11
+difficulty: intermediate
+tags: [accessibility, a11y, aria, focus, forms, wcag]
+technologies: [Semantic HTML, ARIA, WCAG 2.2, eslint-plugin-jsx-a11y, axe-core, Lighthouse, Screen readers]
+updated: 2026-11-09
+---
+
+## What it is
+
+**Accessibility (a11y)** means people can use your app regardless of how they interact with it: keyboard only, screen reader (VoiceOver, NVDA, JAWS), screen magnification, voice control, high contrast, reduced motion. It is also a legal requirement in many places (ADA in the US, the European Accessibility Act in the EU, both pointing at **WCAG 2.x AA**).
+
+React itself is neutral: it renders whatever HTML you write. Accessibility comes from:
+
+1. **Semantic HTML first.** A `button` is focusable, activates on Enter and Space, and is announced as "button" for free. A `div` with `onClick` has none of that.
+2. **Names for everything interactive.** Inputs need labels, icon buttons need an accessible name, images need `alt`.
+3. **Keyboard and focus.** Everything usable with a mouse must work with Tab, Shift+Tab, Enter, Space, Escape and arrow keys where expected, with a **visible** focus indicator. When UI appears or disappears (modals, route changes), move focus deliberately.
+4. **ARIA only when HTML can't express it.** The first rule of ARIA: if a native element with the semantics you need exists, use it instead of adding ARIA to a `div`. ARIA changes what is **announced**, never how an element **behaves**.
+5. **Announcing async changes** with live regions, so screen reader users learn that "3 results loaded" or "Saved".
+6. **Perceivable content**: sufficient color contrast (4.5:1 for normal text, 3:1 for large text and UI component boundaries), not relying on color alone, respecting `prefers-reduced-motion`.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ Looks fine with a mouse, broken for keyboard and screen readers
+function SearchForm() {
+  return (
+    <div>
+      <input placeholder="Email" /> {/* placeholder is not a label */}
+      <span className="text-red-500">Invalid email</span> {/* not linked to the input */}
+
+      {/* not focusable, no role, Enter/Space do nothing */}
+      <div className="btn" onClick={submit}>Submit</div>
+
+      {/* icon-only: announced as just "button" */}
+      <button onClick={close}><XIcon /></button>
+
+      <img src="/chart.png" /> {/* screen reader reads the file name */}
+    </div>
+  );
+}
+
+/* ❌ global CSS that removes focus rings for everyone */
+/* *:focus { outline: none; } */
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ Native elements, real labels, errors wired up with ARIA
+import { useId } from "react";
+
+function EmailField({ error }: { error?: string }) {
+  const id = useId();
+  const errorId = `${id}-error`;
+
+  return (
+    <div>
+      <label htmlFor={id}>Email</label>
+      <input
+        id={id}
+        type="email"
+        autoComplete="email"
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? errorId : undefined}
+      />
+      {error && (
+        <p id={errorId} className="text-red-700">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function Toolbar() {
+  return (
+    <>
+      <button type="submit">Submit</button>
+      <button type="button" aria-label="Close dialog" onClick={close}>
+        <XIcon aria-hidden="true" />
+      </button>
+      <img src="/chart.png" alt="Revenue grew 40% from January to June" />
+      <img src="/divider.svg" alt="" /> {/* decorative: empty alt, skipped */}
+    </>
+  );
+}
+```
+
+</Tab>
+<Tab label="Focus styles">
+
+```css
+/* ✅ Remove the default outline only for mouse users, keep a clear ring for keyboard */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+:focus-visible {
+  outline: 3px solid #2563eb;
+  outline-offset: 2px;
+}
+
+/* Tailwind equivalent on a component:
+   className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2" */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why semantic HTML beats ARIA patches">
+- Browsers expose native elements to the **accessibility tree** with the right role, name, state and keyboard behavior. A `div role="button"` still needs `tabIndex={0}`, an Enter and Space handler, and disabled handling, and it is easy to miss one.
+- `aria-describedby` makes the screen reader read the error **with** the field when it gets focus, and `aria-invalid` announces "invalid entry". Red text alone is invisible to a blind user and ambiguous for color-blind users.
+- `useId` generates IDs that are unique per component instance and match between server and client rendering, so `htmlFor` and `aria-describedby` links never collide (see [useId](/fundamentals/use-id)).
+- `:focus-visible` shows focus rings when the user navigates with the keyboard but not on mouse click, which removes the usual design argument for `outline: none`.
+</Callout>
+
+## How to use
+
+1. **Lint while you type** with `eslint-plugin-jsx-a11y` (Next.js's ESLint config already enables a subset of its rules). For the full recommended set with flat config:
+
+   ```bash
+   npm i -D eslint-plugin-jsx-a11y
+   ```
+
+   ```js
+   // eslint.config.mjs
+   import jsxA11y from "eslint-plugin-jsx-a11y";
+
+   export default [
+     // ...your other configs
+     jsxA11y.flatConfigs.recommended,
+   ];
+   ```
+
+2. **Use the right element**: `button` for actions, `a href` for navigation, `label` for inputs, `fieldset` + `legend` for radio groups, headings in order (`h1` then `h2`), landmarks (`header`, `nav`, `main`, `footer`). Add a "Skip to main content" link as the first focusable element.
+
+3. **Manage focus** when the UI changes: move focus into a dialog when it opens and return it to the trigger when it closes; after a client-side route change, focus the new page's `h1` (Next.js App Router also has a built-in route announcer that reads the new page title).
+
+4. **Announce async results** with a live region that exists in the DOM **before** the message changes (`role="status"` for polite updates, `role="alert"` for urgent errors).
+
+5. **Check contrast** with browser DevTools (the color picker shows the ratio) and design tokens that meet AA.
+
+6. **Test automatically** in component tests with axe-core, and in the browser with `@axe-core/playwright` ([E2E testing](/production/testing-e2e)) and Lighthouse's accessibility audit:
+
+   ```bash
+   npm i -D axe-core @axe-core/playwright
+   ```
+
+   ```tsx
+   import axe from "axe-core";
+   import { render } from "@testing-library/react";
+
+   it("has no detectable a11y violations", async () => {
+     const { container } = render(<SignupForm />);
+     const results = await axe.run(container);
+     expect(results.violations).toEqual([]);
+   });
+   ```
+
+7. **Test manually**, because tools catch only part of the problems: unplug the mouse and use the page with Tab, Enter, Space, Escape and arrows; then try a screen reader (VoiceOver: Cmd+F5 on macOS; NVDA: free on Windows) and listen to how forms, buttons and errors are announced. Zoom to 200% and check nothing overlaps or gets cut off.
+
+## Use-case demos
+
+### Use case 1: accessible modal (native dialog)
+
+```tsx
+"use client";
+import { useEffect, useId, useRef } from "react";
+
+type Props = { open: boolean; onClose: () => void; title: string; children: React.ReactNode };
+
+export function Modal({ open, onClose, title, children }: Props) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
+
+  useEffect(() => {
+    const dialog = ref.current;
+    if (!dialog) return;
+    if (open && !dialog.open) dialog.showModal(); // focus moves inside, background becomes inert
+    if (!open && dialog.open) dialog.close();     // browser returns focus to the opener
+  }, [open]);
+
+  return (
+    <dialog
+      ref={ref}
+      aria-labelledby={titleId}
+      onClose={onClose} // fires on Escape too, keeps React state in sync
+      className="rounded-xl p-6 backdrop:bg-black/50"
+    >
+      <h2 id={titleId}>{title}</h2>
+      {children}
+      <button type="button" onClick={onClose}>Close</button>
+    </dialog>
+  );
+}
+```
+
+`showModal()` gives you most of the hard parts for free: the dialog role, a focus move into the dialog, Escape to close, the rest of the page made **inert** (not clickable or focusable), and rendering in the top layer so `z-index` and overflow don't clip it. If you build a custom modal instead (for example with a [portal](/fundamentals/portals)), you must implement all of that yourself: `role="dialog"`, `aria-modal="true"`, a focus trap, Escape handling, `inert` on the background, and restoring focus to the trigger. Libraries like Radix UI and React Aria do this well.
+
+### Use case 2: form with an error summary and live region
+
+```tsx
+"use client";
+import { useActionState, useEffect, useRef } from "react";
+import { signup, type SignupState } from "./actions";
+
+export function SignupForm() {
+  const [state, formAction, pending] = useActionState<SignupState, FormData>(signup, {});
+  const summaryRef = useRef<HTMLDivElement>(null);
+  const errors = state.errors ?? {};
+  const hasErrors = Object.keys(errors).length > 0;
+
+  useEffect(() => {
+    if (hasErrors) summaryRef.current?.focus(); // jump to the summary after a failed submit
+  }, [state, hasErrors]);
+
+  return (
+    <form action={formAction} noValidate>
+      {hasErrors && (
+        <div ref={summaryRef} tabIndex={-1} role="alert">
+          <h2>Please fix {Object.keys(errors).length} errors</h2>
+          <ul>
+            {Object.entries(errors).map(([field, message]) => (
+              <li key={field}>
+                <a href={`#${field}`}>{message}</a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <label htmlFor="email">Email</label>
+      <input
+        id="email"
+        name="email"
+        type="email"
+        aria-invalid={errors.email ? true : undefined}
+        aria-describedby={errors.email ? "email-error" : undefined}
+      />
+      {errors.email && <p id="email-error">{errors.email}</p>}
+
+      <button type="submit" disabled={pending}>
+        {pending ? "Creating account..." : "Create account"}
+      </button>
+
+      {/* Polite live region: always rendered, content changes get announced */}
+      <p role="status" className="sr-only">
+        {state.success ? "Account created. Check your email to confirm." : ""}
+      </p>
+    </form>
+  );
+}
+```
+
+`sr-only` is the Tailwind utility that hides content visually but keeps it available to screen readers. See also [React Hook Form + Zod](/production/react-hook-form-zod) for client-side validation.
+
+### Use case 3: custom control that really needs ARIA
+
+```tsx
+// A disclosure (show/hide) section: native button + aria-expanded/aria-controls
+import { useId, useState } from "react";
+
+export function Disclosure({ label, children }: { label: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const panelId = useId();
+
+  return (
+    <div>
+      <button type="button" aria-expanded={open} aria-controls={panelId} onClick={() => setOpen((o) => !o)}>
+        {label}
+      </button>
+      <div id={panelId} hidden={!open}>
+        {children}
+      </div>
+    </div>
+  );
+}
+```
+
+The element is still a real `button` (keyboard support for free); ARIA only adds the **state** ("expanded" / "collapsed") that HTML can't express on a button. For simple cases, the native `details` and `summary` elements do this with no JavaScript at all. Complex widgets (combobox, tabs, menus, date pickers) have detailed keyboard patterns in the WAI-ARIA Authoring Practices Guide; prefer a tested library over hand-rolling them.
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Bad ARIA is worse than no ARIA.** `role="button"` on a `div` without keyboard handling, `aria-hidden="true"` on something focusable, or `aria-label` that contradicts the visible text all make things worse.
+- **Placeholder is not a label.** It disappears on input, often has low contrast, and isn't reliably announced.
+- `tabIndex` values greater than 0 break the natural tab order. Use `0` (make focusable in order) or `-1` (focusable by script only, for focus targets like headings and error summaries).
+- **Live regions must exist before the update.** Rendering a new `role="status"` element together with its text is often not announced. Keep the container mounted and change its content.
+- **Automated tools catch only a portion of issues** (estimates commonly put it around a third to a half). axe can't judge whether alt text is meaningful or whether focus order makes sense, and jsdom can't compute color contrast. Do manual keyboard and screen reader checks.
+- Icon fonts and SVGs need `aria-hidden="true"` when decorative, and the parent control needs a name.
+- Don't disable zoom (`maximum-scale=1` / `user-scalable=no` in the viewport meta).
+- Toasts that disappear after 3 seconds can be missed entirely. Give users enough time, or a way to review messages.
+</Callout>
+
+## Interview questions
+
+<QA q="Why is a div with onClick worse than a button?" level="junior">
+
+A `div` isn't focusable, has no role, and doesn't respond to Enter or Space, so keyboard and screen reader users can't find or activate it. A `button` provides focusability, keyboard activation, a 'button' role announcement and disabled behavior for free. To make a `div` equivalent you'd need `role`, `tabIndex`, key handlers and disabled logic, so just use `button`.
+
+</QA>
+
+<QA q="What is the first rule of ARIA?" level="junior">
+
+If a native HTML element or attribute already has the semantics and behavior you need, use it instead of repurposing an element and adding ARIA. ARIA only changes what assistive technology announces; it doesn't add keyboard behavior or focusability. It is for things HTML can't express, like `aria-expanded` on a disclosure button or `aria-live` regions.
+
+</QA>
+
+<QA q="How do you make form validation errors accessible?" level="mid">
+
+Every input has a visible `label` connected via `htmlFor`/`id`. When a field is invalid, set `aria-invalid` on it and link the error text with `aria-describedby`, so the error is read when the field receives focus. After a failed submit, move focus to the first invalid field or an error summary with links to each field. Don't rely on color alone; include text and ideally an icon.
+
+</QA>
+
+<QA q="What does focus management mean for a modal dialog?" level="mid">
+
+When the dialog opens, focus moves into it (the first focusable element or the dialog title). While it's open, Tab cycles only within the dialog and the background is inert, and Escape closes it. When it closes, focus returns to the element that opened it so the user doesn't lose their place. The native `dialog` element with `showModal()` handles most of this; custom modals need a focus trap, `aria-modal`, and manual focus restoration.
+
+</QA>
+
+<QA q="What are live regions and when do you use them?" level="mid">
+
+Live regions are elements whose content changes are announced by screen readers without moving focus. `role="status"` (polite) waits until the user is idle, which suits 'Saved' or '12 results found'; `role="alert"` (assertive) interrupts, for urgent errors. The region must already be in the DOM before its content changes, so render the container always and update its text.
+
+</QA>
+
+<QA q="How do you handle accessibility for client-side route changes in a SPA?" level="senior">
+
+In a traditional site, a page load resets focus and screen readers announce the new title; a client-side navigation does neither, so users may not know anything changed. The fix is to announce the new page (Next.js App Router includes a route announcer that reads the document title or first heading) and move focus to a sensible place, such as the main `h1` with `tabIndex={-1}` or a skip link target. Also make sure the document `title` updates per route, which Next.js metadata does.
+
+</QA>
+
+<QA q="Which tools do you use to test accessibility, and what are their limits?" level="senior">
+
+`eslint-plugin-jsx-a11y` catches issues in JSX while coding, axe-core runs rule checks in component tests and in Playwright with `@axe-core/playwright`, and Lighthouse gives a page-level audit. Testing Library's `getByRole` queries also act as a check, because they only find elements with correct roles and names. The limit is that automated tools find only a fraction of issues; they can't judge whether alt text is meaningful, whether focus order is logical, or whether a custom widget is usable. Manual keyboard testing and a quick screen reader pass are still necessary.
+
+</QA>
+
+<QA q="A designer insists on removing focus outlines because they look ugly. What do you do?" level="senior">
+
+Explain that a visible focus indicator is a WCAG requirement and the only way keyboard users know where they are. The compromise is `:focus-visible`: browsers show it for keyboard navigation but generally not for mouse clicks, so mouse users don't see rings while keyboard users do. Then work with the designer on a custom, on-brand focus style (ring color, offset, thickness) that meets contrast requirements instead of the default outline.
+
+</QA>
+
+<QA q="Your app is audited and fails color contrast in many places. How would you fix it at scale?" level="senior">
+
+Fix it at the design-token level rather than component by component: adjust the text and UI colors in the theme so every combination used meets 4.5:1 for normal text and 3:1 for large text and UI boundaries, including dark mode. Add an automated check (axe in Playwright on key pages) to CI so regressions are caught. Also review places where color is the only signal, such as error states or chart series, and add text, icons or patterns.
+
+</QA>

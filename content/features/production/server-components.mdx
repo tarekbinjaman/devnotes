@@ -1,0 +1,302 @@
+---
+title: Server vs Client Components
+summary: Render most of the UI on the server with zero client JavaScript, and opt into interactivity only where you need it with the "use client" boundary.
+category: production
+order: 4
+difficulty: intermediate
+tags: [rsc, server-components, client-components, nextjs, bundle-size]
+technologies: [React Server Components, "use client", server-only, Next.js App Router]
+updated: 2026-11-09
+---
+
+## What it is
+
+In the Next.js App Router, every component is a **Server Component** by default. It runs only on the server (at build time or per request), can be `async`, can read the database or secrets directly, and sends **rendered output** to the browser, not its JavaScript. Its code never ships in the client bundle.
+
+A **Client Component** is the "classic" React component: it is pre-rendered to HTML on the server and then **hydrated** in the browser, so it can use state, effects, event handlers and browser APIs. You mark the **entry point** of client code with the `"use client"` directive at the top of a file.
+
+The mental model:
+
+| | Server Component | Client Component |
+| --- | --- | --- |
+| Runs where | Server only | Server (SSR pre-render) **and** browser |
+| `async` / `await` data | Yes | No (use a library or `use()` with a passed promise) |
+| `useState`, `useEffect`, `onClick` | No | Yes |
+| Secrets, DB, file system | Yes | Never |
+| Adds to JS bundle | No | Yes, plus everything it imports |
+
+`"use client"` marks a **boundary**, not a single component: the file with the directive and **every module it imports** become part of the client bundle. Props that cross from server to client must be **serializable** (strings, numbers, booleans, plain objects, arrays, `Date`, `Map`, `Set`, promises, JSX, and Server Actions), but not regular functions or class instances.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// app/dashboard/page.tsx
+"use client"; // ❌ whole page (and every import) now ships to the browser
+
+import { useEffect, useState } from "react";
+
+export default function DashboardPage() {
+  const [stats, setStats] = useState<Stats | null>(null);
+
+  // ❌ client waterfall: HTML → JS → hydrate → fetch → render
+  useEffect(() => {
+    fetch("/api/stats").then((r) => r.json()).then(setStats);
+  }, []);
+
+  if (!stats) return <Spinner />;
+  return (
+    <>
+      <StatsGrid stats={stats} />
+      {/* ❌ the only interactive part is this one button */}
+      <RefreshButton />
+    </>
+  );
+}
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// app/dashboard/page.tsx  (Server Component: no directive)
+import { getStats } from "@/server/stats";
+import { StatsGrid } from "./stats-grid";       // server
+import { RefreshButton } from "./refresh-button"; // client leaf
+
+export default async function DashboardPage() {
+  const stats = await getStats(); // ✅ direct DB call, no API route, no spinner
+  return (
+    <>
+      <StatsGrid stats={stats} />
+      <RefreshButton />
+    </>
+  );
+}
+```
+
+```tsx
+// app/dashboard/refresh-button.tsx
+"use client"; // ✅ only this small leaf ships JS
+
+import { useRouter } from "next/navigation";
+import { useTransition } from "react";
+
+export function RefreshButton() {
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
+  return (
+    <button disabled={pending} onClick={() => startTransition(() => router.refresh())}>
+      {pending ? "Refreshing…" : "Refresh"}
+    </button>
+  );
+}
+```
+
+</Tab>
+<Tab label="Server children in client">
+
+```tsx
+// components/collapsible.tsx
+"use client";
+
+import { useState, type ReactNode } from "react";
+
+// ✅ Accepts already-rendered server output via children
+export function Collapsible({ title, children }: { title: string; children: ReactNode }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <section>
+      <button onClick={() => setOpen((o) => !o)}>{title}</button>
+      {open && children}
+    </section>
+  );
+}
+```
+
+```tsx
+// app/orders/page.tsx  (Server Component)
+import { Collapsible } from "@/components/collapsible";
+import { RecentOrders } from "./recent-orders"; // async Server Component
+
+export default function OrdersPage() {
+  return (
+    <Collapsible title="Recent orders">
+      {/* ✅ Rendered on the server, passed in as a prop. Still zero JS. */}
+      <RecentOrders />
+    </Collapsible>
+  );
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why the server-first split wins">
+- **Smaller bundles**: heavy dependencies used only for rendering (markdown parsers, date libraries, syntax highlighters) stay on the server. Only the interactive leaves ship JS.
+- **No client waterfalls**: data is fetched on the server, close to the database, before HTML is sent. No loading spinner for the initial render.
+- **Security by construction**: DB clients, API keys and business logic in Server Components never reach the browser.
+- **Composition**: a Client Component can't import a Server Component, but it can **render one passed as `children`** or another prop, because the server has already rendered it to a serializable result.
+</Callout>
+
+## How to use
+
+1. Start with no directive. Write pages and layouts as `async` Server Components that fetch their own data.
+2. When a piece needs state, effects, event handlers or browser APIs, move **just that piece** into its own file with `"use client"` at the top. Push the boundary down to the leaves.
+3. Pass only serializable props across the boundary: IDs and plain data, not DB models with methods or callbacks. For mutations pass a Server Action (see [Server Actions](/production/server-actions)).
+4. To wrap server content in client behavior (tabs, modals, accordions, providers), make the client component accept `children` and compose them in a Server Component.
+5. Put DB access and secrets in modules that start with `import "server-only"` so an accidental client import fails the build.
+6. Wrap Context providers in a small `"use client"` file and render it in the root layout; the rest of the tree can remain server-rendered (see [Context API](/fundamentals/context-api)).
+7. Stream slow parts with `Suspense` boundaries around async Server Components (see [Suspense](/fundamentals/suspense) and [Rendering Strategies](/production/rendering-strategies)).
+
+## Use-case demos
+
+### Use case 1: blog post with heavy rendering kept on the server
+
+```tsx
+// app/blog/[slug]/page.tsx
+import { notFound } from "next/navigation";
+import { getPostBySlug } from "@/server/posts";
+import { renderMarkdown } from "@/lib/markdown"; // big parser + highlighter, never shipped
+import { LikeButton } from "./like-button";       // "use client"
+
+export default async function PostPage({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params; // Next.js 15: params is a Promise
+  const post = await getPostBySlug(slug);
+  if (!post) notFound();
+
+  const html = await renderMarkdown(post.body);
+  return (
+    <article>
+      <h1>{post.title}</h1>
+      <div dangerouslySetInnerHTML={{ __html: html }} />
+      <LikeButton postId={post.id} initialLikes={post.likes} />
+    </article>
+  );
+}
+```
+
+### Use case 2: keeping DB access server-only
+
+```ts
+// server/db/users.ts
+import "server-only"; // ✅ build error if any Client Component imports this file
+import { db } from "@/server/db";
+
+export async function getUserBilling(userId: string) {
+  return db.user.findUnique({
+    where: { id: userId },
+    select: { plan: true, renewsAt: true }, // ✅ select only what the UI needs
+  });
+}
+```
+
+```tsx
+// app/settings/billing/page.tsx
+import { auth } from "@/auth";
+import { getUserBilling } from "@/server/db/users";
+import { PlanPicker } from "./plan-picker"; // "use client"
+
+export default async function BillingPage() {
+  const session = await auth();
+  if (!session?.user?.id) return null;
+  const billing = await getUserBilling(session.user.id);
+  // ✅ pass plain data, never the whole user row (password hash, tokens…)
+  return <PlanPicker currentPlan={billing?.plan ?? "free"} />;
+}
+```
+
+### Use case 3: client providers without making the app client-side
+
+```tsx
+// app/providers.tsx
+"use client";
+
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useState, type ReactNode } from "react";
+
+export function Providers({ children }: { children: ReactNode }) {
+  const [client] = useState(() => new QueryClient());
+  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+}
+```
+
+```tsx
+// app/layout.tsx  (Server Component)
+import { Providers } from "./providers";
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        {/* children are still Server Components */}
+        <Providers>{children}</Providers>
+      </body>
+    </html>
+  );
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Hooks in a Server Component** (`useState`, `useEffect`, `useContext`) fail with an error telling you to add `"use client"`. Split the interactive bit out instead of marking the whole page.
+- **Importing a Server Component into a Client Component** turns it into client code (and it breaks if it is `async` or uses server-only modules). Pass it as `children` instead.
+- **Passing functions as props** from server to client fails ("Functions cannot be passed directly to Client Components"). Pass a Server Action or move the handler into the client file.
+- Passing a **whole DB object** across the boundary serializes every field into the page payload, including ones you didn't mean to expose. Select and pass only what the client needs.
+- Third-party components that use hooks but lack `"use client"` must be re-exported from your own `"use client"` file.
+- `"use client"` does **not** mean "client-only rendering": Client Components are still pre-rendered to HTML on the server, so don't touch `window` during render.
+- Highly interactive surfaces (editors, canvases, real-time dashboards) are legitimately mostly client code; don't contort them to be server-first.
+</Callout>
+
+## Interview questions
+
+<QA q="What is a React Server Component and how is it different from SSR?" level="mid">
+
+A Server Component runs only on the server and sends its rendered result (the RSC payload) to the client; its code never ships in the bundle and it never hydrates. SSR is about generating initial HTML for components that **will** hydrate and run in the browser too. In Next.js both happen: Server Components produce the payload, and Client Components are additionally SSR-rendered to HTML and then hydrated. So RSC reduces JavaScript, while SSR improves first paint.
+
+</QA>
+
+<QA q="What does the 'use client' directive actually do?" level="junior">
+
+It marks a module as the entry point into the client bundle. That file, and every module it imports, is treated as client code that can use state, effects and event handlers. You don't need it in every interactive component, only at the boundary: children imported by a client file are already client components. Components without the directive in the App Router are Server Components by default.
+
+</QA>
+
+<QA q="Can a Client Component import a Server Component?" level="mid">
+
+Not directly: anything imported from a client module becomes client code, so an `async` component or one using server-only code would break. The pattern is composition: the Client Component accepts `children` (or another `ReactNode` prop), and a Server Component parent renders the server child into that slot. The server renders it first and passes the result through, so it stays a Server Component with no client JS.
+
+</QA>
+
+<QA q="What can and cannot be passed as props from a Server Component to a Client Component?" level="mid">
+
+Props must be serializable by React: primitives, plain objects and arrays, `Date`, `Map`, `Set`, typed arrays, promises, JSX elements and Server Actions. Regular functions, class instances (for example ORM entities with methods) and symbols can't cross. A practical rule: pass IDs and plain data shaped for the UI, and pass Server Actions for mutations.
+
+</QA>
+
+<QA q="How do you make sure database code never ends up in the client bundle?" level="mid">
+
+Keep data access in dedicated server modules and add `import "server-only"` at the top; if a Client Component imports one, the build fails with a clear error instead of silently bundling it. Also, only environment variables prefixed with `NEXT_PUBLIC_` are inlined into client code, so secrets read on the client would be `undefined` anyway. Combined with passing only selected fields as props, this forms a solid boundary.
+
+</QA>
+
+<QA q="Your dashboard page has 'use client' at the top and a big bundle. How would you refactor it?" level="senior">
+
+Remove the directive from the page and make it an `async` Server Component that fetches data directly on the server, replacing the `useEffect` fetch. Identify the truly interactive pieces (filters, buttons, charts with hover) and extract them into small client leaf components that receive plain data as props. Wrap slow sections in `Suspense` so they stream. Then verify with the bundle analyzer that heavy libraries only used for rendering no longer appear in the client chunks.
+
+</QA>
+
+<QA q="If Server Components can't use Context, how do you use a theme or query provider?" level="mid">
+
+Create a small Client Component that renders the provider and accepts `children`, then render it in the root layout around the app. Server Components passed as `children` still render on the server; only the provider itself is client code. Client Components below can read the context with `useContext`, while Server Components get data by fetching or via props instead.
+
+</QA>
+
+<QA q="What are the trade-offs of Server Components?" level="senior">
+
+Benefits: less client JavaScript, data fetching close to the data source, no client waterfalls for the initial render, and secrets stay on the server. Costs: a new mental model with a boundary to manage, serialization constraints on props, every navigation needing a server round trip for the RSC payload, and some libraries not yet working in a server context. They suit content-heavy and data-driven pages best; highly interactive apps still lean heavily on Client Components.
+
+</QA>

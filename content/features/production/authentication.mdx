@@ -1,0 +1,299 @@
+---
+title: Authentication & Authorization
+summary: Know who the user is (authentication) and what they may do (authorization) with secure cookie sessions, Auth.js, and checks at every layer of a Next.js app.
+category: production
+order: 7
+difficulty: advanced
+tags: [auth, sessions, jwt, oauth, security, nextjs, rbac]
+technologies: [Auth.js (NextAuth v5), httpOnly cookies, JWT, OAuth 2.0, Next.js middleware, SameSite]
+updated: 2026-11-09
+---
+
+## What it is
+
+- **Authentication (authn)**: proving who the user is (password, magic link, OAuth with Google/GitHub, passkeys).
+- **Authorization (authz)**: deciding what that user may do (view this invoice, delete that project, access the admin panel).
+
+After login the server has to **remember** the user across requests. Two main approaches:
+
+| | Server session (session ID in cookie) | JWT (signed token, often in a cookie) |
+| --- | --- | --- |
+| Where state lives | Database / Redis, keyed by a random session ID | Inside the token itself (claims), signed by the server |
+| Revoke / log out everywhere | Easy: delete the session row | Hard: token is valid until it expires (needs short expiry or a denylist) |
+| Per-request cost | A DB/Redis lookup | Just verify the signature |
+| Stale data | Always current | Role changes only show up after the token refreshes |
+| Size | Tiny cookie | Grows with claims (cookies max ~4 KB) |
+
+Wherever the token lives, store it in an **httpOnly, Secure, SameSite cookie**, not `localStorage`. JavaScript can't read httpOnly cookies, so an XSS bug can't steal the session.
+
+In Next.js, **Auth.js (NextAuth v5)** is the common choice. You configure providers once and get an `auth()` helper that works in Server Components, Server Actions, Route Handlers and middleware. Without a database adapter it uses an encrypted JWT in a cookie; with an adapter it can use database sessions.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ Token in localStorage: readable by any injected script (XSS = account takeover)
+localStorage.setItem("token", data.accessToken);
+
+// ❌ "Protecting" a page only in a Client Component: the HTML/data may already be sent,
+//    and the API behind it is still open
+"use client";
+export default function AdminPage() {
+  const { user } = useUser();
+  if (user?.role !== "admin") return <p>Forbidden</p>;
+  return <AdminPanel />;
+}
+
+// ❌ Trusting the client to say who it is
+export async function deleteProject(projectId: string, userId: string) {
+  "use server";
+  await db.project.delete({ where: { id: projectId, ownerId: userId } }); // userId from client!
+}
+```
+
+</Tab>
+<Tab label="Correct">
+
+```ts
+// auth.ts: Auth.js v5 config (the documented pattern)
+import NextAuth from "next-auth";
+import GitHub from "next-auth/providers/github";
+
+// Reads AUTH_SECRET, AUTH_GITHUB_ID, AUTH_GITHUB_SECRET from env by convention
+export const { handlers, auth, signIn, signOut } = NextAuth({
+  providers: [GitHub],
+});
+```
+
+```ts
+// app/api/auth/[...nextauth]/route.ts
+import { handlers } from "@/auth";
+export const { GET, POST } = handlers;
+```
+
+```tsx
+// app/admin/page.tsx: check on the server, before any data is loaded
+import { redirect } from "next/navigation";
+import { auth } from "@/auth";
+
+export default async function AdminPage() {
+  const session = await auth();
+  if (!session?.user) redirect("/login");
+  if (session.user.role !== "admin") redirect("/"); // role added via callbacks (see below)
+  const stats = await getAdminStats();
+  return <AdminPanel stats={stats} />;
+}
+```
+
+```ts
+// app/projects/actions.ts: identity from the session, ownership enforced in the query
+"use server";
+
+import { auth } from "@/auth";
+import { db } from "@/server/db";
+
+export async function deleteProject(projectId: string) {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  await db.project.delete({ where: { id: projectId, ownerId: session.user.id } });
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why it's safer">
+- **httpOnly cookies** are sent automatically by the browser but invisible to JavaScript, which removes the most common token-theft path.
+- **Server-side checks** run before data is fetched or rendered, so unauthorized users never receive the HTML or the RSC payload.
+- **Identity from the session, never from input**: the client can send any `userId`; only the server-verified session is trustworthy.
+- **Defense in depth**: middleware gives fast redirects, but the real enforcement sits next to the data (pages, actions, data-access functions), so one missed layer isn't a breach.
+</Callout>
+
+## How to use
+
+1. Install Auth.js (`next-auth@beta` at the time of v5), generate `AUTH_SECRET`, and create `auth.ts` exporting `handlers`, `auth`, `signIn`, `signOut`.
+2. Mount the handlers at `app/api/auth/[...nextauth]/route.ts` and add providers (OAuth, credentials, email). Register the callback URL with each OAuth provider.
+3. Add an **optimistic** check in `middleware.ts` to redirect signed-out users away from private sections quickly.
+4. Do the **authoritative** checks on the server where data is accessed: `await auth()` in pages and layouts, at the top of every [Server Action](/production/server-actions) and Route Handler, and ideally in a data-access layer.
+5. For **authorization**, put the role or permissions in the session (via the `jwt` and `session` callbacks, or a DB lookup) and check them per operation, including **resource ownership** (is this the user's invoice?).
+6. Keep cookies `httpOnly`, `Secure` and `SameSite=Lax` (Auth.js does this by default) and use POST for state-changing requests.
+7. Never pass the full session or user row to Client Components; pass only the fields the UI needs (see [Server vs Client Components](/production/server-components)).
+
+<Callout type="info" title="OAuth flow in one paragraph">
+The user clicks "Sign in with GitHub" and is redirected to GitHub with your client ID, requested scopes, a `state` value (CSRF protection) and, with PKCE, a code challenge. After consent, GitHub redirects back to your callback URL with a one-time **authorization code**. Your server exchanges that code (plus client secret or PKCE verifier) for tokens, reads the user profile, and creates its **own** session cookie. The browser never handles the provider's tokens directly.
+</Callout>
+
+## Use-case demos
+
+### Use case 1: middleware for fast redirects (first layer only)
+
+```ts
+// middleware.ts
+import { auth } from "@/auth";
+
+export default auth((req) => {
+  const isLoggedIn = !!req.auth;
+  const isPrivate = req.nextUrl.pathname.startsWith("/dashboard");
+  if (isPrivate && !isLoggedIn) {
+    const url = new URL("/login", req.nextUrl.origin);
+    url.searchParams.set("callbackUrl", req.nextUrl.pathname);
+    return Response.redirect(url);
+  }
+});
+
+export const config = {
+  // Skip static files and Next.js internals
+  matcher: ["/((?!api|_next/static|_next/image|favicon.ico).*)"],
+};
+```
+
+Middleware is great for UX (no flash of a private page), but it is **not** enough on its own: matchers can miss routes, Server Actions post to the page URL, and a 2025 Next.js vulnerability (CVE-2025-29927) allowed skipping middleware entirely on unpatched versions. In Next.js 16 this file is renamed `proxy.ts`.
+
+### Use case 2: role-based access with a reusable guard (admin)
+
+```ts
+// auth.ts: put the role into the token and session
+export const { handlers, auth, signIn, signOut } = NextAuth({
+  providers: [GitHub],
+  callbacks: {
+    jwt({ token, user }) {
+      if (user) token.role = (user as { role?: string }).role ?? "user"; // on sign-in
+      return token;
+    },
+    session({ session, token }) {
+      session.user.role = token.role as string; // needs a module augmentation for types
+      return session;
+    },
+  },
+});
+```
+
+```ts
+// server/auth-guards.ts
+import "server-only";
+import { redirect } from "next/navigation";
+import { auth } from "@/auth";
+
+type Role = "user" | "editor" | "admin";
+
+export async function requireRole(...allowed: Role[]) {
+  const session = await auth();
+  if (!session?.user) redirect("/login");
+  if (!allowed.includes(session.user.role as Role)) redirect("/forbidden");
+  return session.user;
+}
+```
+
+```tsx
+// app/admin/users/page.tsx
+import { requireRole } from "@/server/auth-guards";
+
+export default async function UsersAdminPage() {
+  await requireRole("admin");
+  const users = await listUsers();
+  return <UsersTable users={users} />;
+}
+```
+
+### Use case 3: sign-in and sign-out with Server Actions
+
+```tsx
+// components/auth-buttons.tsx  (Server Component)
+import { signIn, signOut } from "@/auth";
+
+export function SignIn() {
+  return (
+    <form
+      action={async () => {
+        "use server";
+        await signIn("github", { redirectTo: "/dashboard" });
+      }}
+    >
+      <button>Sign in with GitHub</button>
+    </form>
+  );
+}
+
+export function SignOut() {
+  return (
+    <form
+      action={async () => {
+        "use server";
+        await signOut({ redirectTo: "/" });
+      }}
+    >
+      <button>Sign out</button>
+    </form>
+  );
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Don't rely on middleware alone.** Re-check in pages, Server Actions, Route Handlers and data-access functions.
+- **Checking in a layout isn't enough either**: layouts don't re-run on every client navigation, and a Server Action on a child page doesn't go through the layout. Check close to the data.
+- **Don't store tokens in localStorage** or put sensitive data (emails, permissions you rely on without re-checking) in a JWT readable by the client.
+- **JWT sessions can't be revoked instantly**; banned users or role changes take effect only after expiry or refresh. Use short lifetimes or database sessions when that matters.
+- **CSRF**: cookies are sent automatically, so state-changing requests need protection. `SameSite=Lax` blocks most cross-site POSTs, Server Actions only accept POST and compare the Origin header with the host, and Auth.js protects its own endpoints with a CSRF token. Never mutate state on GET.
+- Never cache authenticated responses publicly (see [API Caching](/backend/api-caching)), and don't call `auth()` in the root layout unless you accept that every page becomes dynamic.
+- Rolling your own password hashing, reset tokens and session handling is a large security surface; prefer a maintained library or provider. See also [Security](/production/security).
+</Callout>
+
+## Interview questions
+
+<QA q="What is the difference between authentication and authorization?" level="junior">
+
+Authentication verifies **who** the user is, for example by checking a password or completing an OAuth login. Authorization decides **what** that authenticated user is allowed to do, such as whether they can edit this document or open the admin panel. A user can be authenticated but not authorized for a given action, which should return 403 rather than 401.
+
+</QA>
+
+<QA q="Sessions vs JWT: what are the trade-offs?" level="mid">
+
+Server sessions store a random ID in a cookie and the data in a database or Redis: easy to revoke and always current, but each request needs a lookup. JWTs carry signed claims, so verification is stateless and fast, but they can't be revoked before expiry without extra infrastructure, and claims such as roles can be stale. JWTs suit distributed systems and stateless edge checks; sessions suit apps that need instant logout, bans or role changes. Many apps use short-lived JWTs plus refresh, or database sessions.
+
+</QA>
+
+<QA q="Where should you store an auth token in the browser, and why not localStorage?" level="mid">
+
+In an `httpOnly`, `Secure`, `SameSite=Lax` (or `Strict`) cookie set by the server. `localStorage` is readable by any JavaScript running on the page, so a single XSS vulnerability or malicious dependency can exfiltrate the token and impersonate the user from anywhere. An httpOnly cookie can't be read by scripts; XSS is still dangerous, but the attacker can't take the token away and reuse it elsewhere.
+
+</QA>
+
+<QA q="Where do you check auth in a Next.js App Router app?" level="senior">
+
+In layers. Middleware performs fast, optimistic redirects for whole sections. Pages and Route Handlers call `auth()` before loading data. Every Server Action authenticates and authorizes itself because it's a public endpoint. Ideally a server-only data-access layer enforces ownership in its queries, so even a forgotten page check can't leak data. No single layer is trusted alone; that's defense in depth.
+
+</QA>
+
+<QA q="Why isn't middleware enough to protect routes?" level="senior">
+
+Matchers are easy to misconfigure and miss new routes; Server Actions and Route Handlers can be called directly; and middleware runs separately from your data access, so it can only make coarse decisions. There has also been a real vulnerability (CVE-2025-29927) where a crafted header let requests skip Next.js middleware on unpatched versions. The authoritative check belongs next to the data access, with middleware as a UX layer.
+
+</QA>
+
+<QA q="What is CSRF and how do SameSite cookies help?" level="mid">
+
+Cross-Site Request Forgery tricks a logged-in user's browser into sending a request to your site from another site, and the browser attaches the session cookie automatically. `SameSite=Lax` stops cookies from being sent on cross-site subrequests and POSTs, which blocks the classic attack; `Strict` blocks them on top-level cross-site navigations too. Additional defenses are CSRF tokens, checking the Origin header, and never changing state on GET. Next.js Server Actions only accept POST and compare Origin with the host.
+
+</QA>
+
+<QA q="Explain the OAuth authorization code flow." level="mid">
+
+Your app redirects the user to the provider with its client ID, scopes, a redirect URI, a random `state` value, and usually a PKCE challenge. After the user consents, the provider redirects back with a short-lived authorization code. Your server exchanges the code for tokens using the client secret or PKCE verifier, validates `state`, fetches the profile, and then creates its own session for the user. The code-for-token exchange happens server-to-server, so tokens aren't exposed in the browser URL.
+
+</QA>
+
+<QA q="A user's role is downgraded from admin, but they can still access admin pages for an hour. Why, and how do you fix it?" level="senior">
+
+The role is probably stored in a JWT session, and the token stays valid with the old claim until it expires or refreshes. Fixes: use database sessions so the role is read fresh, re-check the role from the database for sensitive operations, shorten the JWT lifetime and refresh it, or keep a revocation list or session version number checked on each request. For admin actions, reading permissions from the database each time is a reasonable cost.
+
+</QA>
+
+<QA q="How would you implement role-based access control in a Next.js app?" level="mid">
+
+Store the role or permissions on the user in the database and expose them in the session via Auth.js callbacks. Create server-only helpers such as `requireRole('admin')` or `can(user, 'delete', project)` and call them in pages, Server Actions and Route Handlers. Check both the role and ownership of the specific resource. The UI may hide buttons based on the role, but that's only cosmetic; the server check is the real enforcement.
+
+</QA>

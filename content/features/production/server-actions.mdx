@@ -1,0 +1,348 @@
+---
+title: Server Actions & Mutations
+summary: Mutate data with async server functions called straight from forms and components, then revalidate the cache, with validation, pending states, optimistic UI and proper auth checks.
+category: production
+order: 5
+difficulty: intermediate
+tags: [server-actions, mutations, forms, nextjs, react-19, security]
+technologies: ["use server", useActionState, useFormStatus, useOptimistic, Zod, revalidatePath, revalidateTag]
+updated: 2026-11-09
+---
+
+## What it is
+
+Every app has to **write** data: create a post, update a profile, delete an item. Traditionally that means an API route, a `fetch` call, JSON parsing, loading state, error state and a cache refresh on the client.
+
+A **Server Action** (React calls them Server Functions) is an `async` function marked with `"use server"` that runs **only on the server** but can be called from the client. Next.js turns it into an HTTP POST endpoint behind the scenes. You can:
+
+- pass it to a form's `action` prop, so the form works even **before JavaScript loads** (progressive enhancement),
+- call it from an event handler or transition like a normal async function,
+- after mutating, call `revalidatePath` / `revalidateTag` to refresh cached data and `redirect` to navigate.
+
+React 19 adds hooks around actions: `useActionState` (returned state + pending flag), `useFormStatus` (pending state of the parent form) and `useOptimistic` (show the result before the server confirms).
+
+The key security fact: **every Server Action is a public POST endpoint**. Anyone can call it with any arguments, so it must validate input and check authentication and authorization itself.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// app/posts/actions.ts
+"use server";
+
+import { db } from "@/server/db";
+
+// ❌ No auth check: anyone can POST to this action
+// ❌ Trusts the client: authorId and published come straight from the form
+// ❌ No validation, no revalidation, errors crash the page
+export async function createPost(formData: FormData) {
+  await db.post.create({
+    data: {
+      title: formData.get("title") as string,
+      body: formData.get("body") as string,
+      authorId: formData.get("authorId") as string,
+      published: formData.get("published") === "on",
+    },
+  });
+}
+```
+
+</Tab>
+<Tab label="Correct">
+
+```ts
+// app/posts/actions.ts
+"use server";
+
+import { z } from "zod";
+import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+import { auth } from "@/auth";
+import { db } from "@/server/db";
+
+const PostSchema = z.object({
+  title: z.string().trim().min(3, "Title must be at least 3 characters").max(120),
+  body: z.string().trim().min(1, "Body is required"),
+});
+
+export type PostFormState = {
+  errors?: Partial<Record<"title" | "body", string[]>>;
+  message?: string;
+};
+
+export async function createPost(
+  _prev: PostFormState,
+  formData: FormData,
+): Promise<PostFormState> {
+  // ✅ 1. Authenticate inside the action
+  const session = await auth();
+  if (!session?.user?.id) return { message: "You must be signed in." };
+
+  // ✅ 2. Validate untrusted input on the server
+  const parsed = PostSchema.safeParse(Object.fromEntries(formData));
+  if (!parsed.success) return { errors: parsed.error.flatten().fieldErrors };
+
+  // ✅ 3. Derive ownership from the session, never from the form
+  let postId: string;
+  try {
+    const post = await db.post.create({
+      data: { ...parsed.data, authorId: session.user.id },
+    });
+    postId = post.id;
+  } catch {
+    return { message: "Could not save the post. Try again." };
+  }
+
+  // ✅ 4. Refresh cached pages, then navigate (redirect throws, so keep it outside try)
+  revalidatePath("/posts");
+  redirect(`/posts/${postId}`);
+}
+```
+
+</Tab>
+<Tab label="Form with useActionState">
+
+```tsx
+// app/posts/new/post-form.tsx
+"use client";
+
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
+import { createPost, type PostFormState } from "../actions";
+
+function SubmitButton() {
+  const { pending } = useFormStatus(); // ✅ reads the status of the parent form
+  return <button disabled={pending}>{pending ? "Saving…" : "Publish"}</button>;
+}
+
+export function PostForm() {
+  const [state, formAction, isPending] = useActionState<PostFormState, FormData>(
+    createPost,
+    {},
+  );
+
+  return (
+    <form action={formAction} aria-busy={isPending}>
+      <input name="title" aria-invalid={!!state.errors?.title} />
+      {state.errors?.title && <p role="alert">{state.errors.title[0]}</p>}
+
+      <textarea name="body" />
+      {state.errors?.body && <p role="alert">{state.errors.body[0]}</p>}
+
+      {state.message && <p role="alert">{state.message}</p>}
+      <SubmitButton />
+    </form>
+  );
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why this pattern is better">
+- **No API layer to maintain**: the action is a typed function import; Next.js creates the endpoint, serializes arguments and returns results.
+- **Progressive enhancement**: a form with `action` submits as a normal POST before hydration, so it works on slow devices.
+- **One round trip**: the action's response can include the re-rendered RSC payload for revalidated routes, so the UI updates without a separate refetch.
+- **Security in one place**: auth, validation and ownership checks live next to the write, where they can't be skipped by calling the endpoint directly.
+</Callout>
+
+## How to use
+
+1. Create an `actions.ts` file with `"use server"` at the top (every export becomes an action), or put `"use server"` as the first line inside an `async` function in a Server Component.
+2. Start every action with **authentication and authorization** (see [Authentication & Authorization](/production/authentication)). Don't rely on the page or middleware having checked.
+3. **Validate** the input with Zod using `safeParse`, and return field errors as plain serializable data. Share the schema with the client form if you want instant feedback (see [React Hook Form + Zod](/production/react-hook-form-zod)).
+4. Perform the mutation; catch expected failures and return a message instead of throwing.
+5. Call `revalidatePath("/route")` or `revalidateTag("tag")` so cached pages show fresh data, then `redirect()` if you need to navigate (outside `try/catch`, because it works by throwing).
+6. In the client, wire it with `useActionState` for returned state, `useFormStatus` for submit buttons, and `useOptimistic` for instant feedback.
+7. For non-form calls (like a toggle), call the action inside `startTransition` so you get a pending state and can use optimistic updates.
+
+## Use-case demos
+
+### Use case 1: optimistic todo toggle (dashboard)
+
+```tsx
+// app/todos/todo-list.tsx
+"use client";
+
+import { useOptimistic, useTransition } from "react";
+import { toggleTodo } from "./actions";
+
+type Todo = { id: string; title: string; done: boolean };
+
+export function TodoList({ todos }: { todos: Todo[] }) {
+  const [optimisticTodos, setOptimistic] = useOptimistic(
+    todos,
+    (current, id: string) => current.map((t) => (t.id === id ? { ...t, done: !t.done } : t)),
+  );
+  const [, startTransition] = useTransition();
+
+  return (
+    <ul>
+      {optimisticTodos.map((todo) => (
+        <li key={todo.id}>
+          <label>
+            <input
+              type="checkbox"
+              checked={todo.done}
+              onChange={() =>
+                startTransition(async () => {
+                  setOptimistic(todo.id); // ✅ UI flips instantly
+                  await toggleTodo(todo.id); // server confirms; props refresh via revalidatePath
+                })
+              }
+            />
+            {todo.title}
+          </label>
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+If the action throws, the transition ends and the optimistic value is dropped, so the checkbox snaps back to the server truth.
+
+### Use case 2: admin delete with authorization and tag revalidation
+
+```ts
+// app/admin/products/actions.ts
+"use server";
+
+import { z } from "zod";
+import { revalidateTag } from "next/cache";
+import { auth } from "@/auth";
+import { db } from "@/server/db";
+
+export async function deleteProduct(productId: string) {
+  const session = await auth();
+  // ✅ authorization, not just authentication
+  if (session?.user?.role !== "admin") throw new Error("Forbidden");
+
+  const id = z.string().uuid().parse(productId); // ✅ arguments are untrusted too
+  await db.product.delete({ where: { id } });
+
+  revalidateTag("products"); // every fetch / cache entry tagged "products" is refreshed
+}
+```
+
+```tsx
+// app/admin/products/delete-button.tsx
+"use client";
+
+import { deleteProduct } from "./actions";
+
+export function DeleteButton({ id }: { id: string }) {
+  // ✅ bind pre-fills arguments; the form still works without JS
+  const deleteWithId = deleteProduct.bind(null, id);
+  return (
+    <form action={deleteWithId}>
+      <button>Delete</button>
+    </form>
+  );
+}
+```
+
+### Use case 3: inline action in a Server Component (blog comments)
+
+```tsx
+// app/blog/[slug]/comments.tsx  (Server Component)
+import { revalidatePath } from "next/cache";
+import { auth } from "@/auth";
+import { db } from "@/server/db";
+
+export async function Comments({ postId, slug }: { postId: string; slug: string }) {
+  const comments = await db.comment.findMany({ where: { postId } });
+
+  async function addComment(formData: FormData) {
+    "use server";
+    const session = await auth();
+    if (!session?.user?.id) return;
+    const text = String(formData.get("text") ?? "").trim().slice(0, 1000);
+    if (!text) return;
+    await db.comment.create({ data: { postId, text, authorId: session.user.id } });
+    revalidatePath(`/blog/${slug}`);
+  }
+
+  return (
+    <section>
+      {comments.map((c) => <p key={c.id}>{c.text}</p>)}
+      <form action={addComment}>
+        <textarea name="text" required />
+        <button>Comment</button>
+      </form>
+    </section>
+  );
+}
+```
+
+Closed-over values like `postId` are sent to the client in encrypted form and back again, but treat them as visible and never close over secrets.
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Actions are public endpoints.** Hiding the button for non-admins does nothing; check the session and role inside every action.
+- **Never trust IDs from the client** for ownership (`authorId`, `userId`). Take them from the session and check the record belongs to the user.
+- `redirect()` and `notFound()` work by throwing; calling them inside `try/catch` swallows the navigation.
+- Forgetting `revalidatePath` / `revalidateTag` leaves stale data on screen after a successful mutation.
+- Return **serializable** values only (plain objects), and don't return raw error objects or stack traces to the client.
+- `useFormStatus` only works in a component **rendered inside** the form, not in the component that renders the form.
+- Actions are for **mutations**. Don't use them to fetch data for rendering (they run sequentially and aren't cached); fetch in Server Components or use [TanStack Query](/production/tanstack-query).
+- Public third-party clients (mobile apps, webhooks) need a stable, documented API; use Route Handlers for those.
+</Callout>
+
+## Interview questions
+
+<QA q="What is a Server Action and how does it work under the hood?" level="junior">
+
+It's an `async` function marked with `"use server"` that executes on the server but can be called from client code or used as a form `action`. At build time Next.js replaces the client reference with an ID; calling it sends a POST request with that ID and the serialized arguments. The server runs the function and returns the result, and can include an updated RSC payload if you revalidated paths.
+
+</QA>
+
+<QA q="Why must you authenticate inside every Server Action, even if the page is protected?" level="mid">
+
+An action is reachable as a POST endpoint independently of the page that renders the form. Anyone who knows or discovers the action ID can call it with arbitrary arguments, bypassing your UI, middleware matchers and any client-side checks. So each action must verify the session, check the user is allowed to perform this operation on this resource, and validate the input, exactly like an API route.
+
+</QA>
+
+<QA q="What do useActionState and useFormStatus do, and how are they different?" level="mid">
+
+`useActionState(action, initialState)` wraps an action and returns the latest returned state, a wrapped action to pass to the form, and an `isPending` flag; the action receives the previous state as its first argument. It's for showing results like validation errors. `useFormStatus()` from `react-dom` gives the pending status (and submitted data) of the **parent** form, and must be called in a component rendered inside that form, typically the submit button.
+
+</QA>
+
+<QA q="How do you show validation errors from a Server Action?" level="mid">
+
+Validate with a schema such as Zod using `safeParse`, and on failure return a plain object with field errors instead of throwing. Read that returned state with `useActionState` and render messages next to the fields. For instant feedback you can also validate on the client with the same schema, but the server check is the one that matters for security.
+
+```ts
+const parsed = Schema.safeParse(Object.fromEntries(formData));
+if (!parsed.success) return { errors: parsed.error.flatten().fieldErrors };
+```
+
+</QA>
+
+<QA q="revalidatePath vs revalidateTag: when do you use each?" level="mid">
+
+`revalidatePath('/posts')` invalidates the cached data and render output for a specific route, which is simple when you know which pages show the data. `revalidateTag('posts')` invalidates every cached fetch or cache entry tagged with that tag, wherever it is used, which scales better when the same data appears on many routes (list, detail, sidebar). Tags require you to tag your fetches or cached functions consistently.
+
+</QA>
+
+<QA q="How does useOptimistic work, and what happens if the action fails?" level="senior">
+
+`useOptimistic(state, updateFn)` returns an optimistic copy of the state and a setter; you call the setter inside a transition or action to show the expected result immediately. While the transition is pending, React renders the optimistic value. When it finishes, React discards the optimistic value and renders the real state from props, so if the server revalidated, you see the confirmed data, and if the action threw, the UI reverts. You should still surface an error message so the revert isn't confusing.
+
+</QA>
+
+<QA q="Server Actions vs Route Handlers vs TanStack Query mutations: which would you choose?" level="senior">
+
+Server Actions are the default for mutations triggered from your own Next.js UI: typed, progressively enhanced, and integrated with revalidation. Route Handlers are better for public or external consumers (mobile apps, webhooks, third-party integrations) that need a stable URL and HTTP semantics. TanStack Query mutations make sense when most data lives in a client cache with complex invalidation, retries and offline behavior; you can even call a Server Action as the mutation function.
+
+</QA>
+
+<QA q="A user reports that after saving a form they still see old data. What would you check?" level="mid">
+
+First, whether the action calls `revalidatePath` or `revalidateTag` for every route or tag that displays that data, and that tags match those used when fetching. Then check whether the page reads data through a cache that isn't covered (for example `unstable_cache` with different tags, or a client-side TanStack Query cache that needs invalidation). Also verify the write actually succeeded and that `redirect` isn't swallowed inside a `try/catch`.
+
+</QA>

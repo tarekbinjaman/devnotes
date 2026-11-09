@@ -15,6 +15,7 @@ export type Category = {
 export const CATEGORIES: Category[] = [
   { slug: "js-fundamentals", name: "JavaScript Fundamentals", description: "The JS concepts every React interview tests: closures, the event loop, promises, this, copying.", icon: "🧠" },
   { slug: "fundamentals", name: "React Fundamentals", description: "Core React concepts in learning order: components, state, rendering and hooks.", icon: "📘" },
+  { slug: "production", name: "Production React", description: "What real React jobs use: data fetching, forms, state, Next.js server features, testing, a11y and security.", icon: "🚀" },
   { slug: "react", name: "React / Next.js", description: "Real-world React & Next.js patterns: filtering, search, lazy loading.", icon: "⚛️" },
   { slug: "javascript", name: "JavaScript / TypeScript", description: "Language-level utilities and performance techniques.", icon: "🟨" },
   { slug: "css", name: "CSS / Tailwind / UI", description: "Layouts, animations and rendering-heavy UI.", icon: "🎨" },

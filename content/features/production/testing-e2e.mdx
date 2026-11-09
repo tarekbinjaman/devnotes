@@ -1,0 +1,316 @@
+---
+title: End-to-End Testing with Playwright
+summary: Drive a real browser through your app's critical user journeys with Playwright, from local runs to CI against a production build.
+category: production
+order: 10
+difficulty: intermediate
+tags: [testing, e2e, playwright, ci, flaky-tests]
+technologies: [Playwright, "@playwright/test", storageState, Trace Viewer, GitHub Actions, Next.js]
+updated: 2026-11-09
+---
+
+## What it is
+
+An **end-to-end (E2E) test** runs your real app in a real browser and acts like a user: open a page, click, type, and check what shows up. It covers everything at once (React, routing, Server Components, API routes, database, cookies) which is exactly what unit tests can't.
+
+**Playwright** (`@playwright/test`) is the standard tool: it drives Chromium, Firefox and WebKit, runs tests in parallel, **auto-waits** for elements, and records traces you can replay step by step.
+
+Where E2E fits, using the **testing trophy** (Kent C. Dodds) as a guide:
+
+| Layer | What it checks | Speed / cost | How many |
+| --- | --- | --- | --- |
+| Static (TypeScript, ESLint) | Typos, type errors, a11y lint | Instant | Everywhere |
+| Unit | Pure functions, reducers, schemas | Milliseconds | Many, for complex logic |
+| Integration / component | A component or feature with its children, mocked network | Fast | **Most of your tests** |
+| E2E | Full user journeys through the real stack | Seconds each, needs a running app | **A focused set of critical paths** |
+
+Write E2E tests for the flows that would cost money or trust if they broke: sign up, log in, checkout, the core "job" of your product. Cover edge cases and variations lower down in [unit and component tests](/production/testing-unit).
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```ts
+// ❌ Fragile selectors, manual sleeps, non-retrying assertions
+import { test, expect } from "@playwright/test";
+
+test("checkout", async ({ page }) => {
+  await page.goto("http://localhost:3000/products");
+
+  await page.click("div.grid > div:nth-child(3) .btn"); // breaks when layout changes
+  await page.waitForTimeout(3000); // slow AND still flaky
+
+  const text = await page.locator("#cart-count").textContent();
+  expect(text).toBe("1"); // read once: no retry if the UI updates 50ms later
+
+  // Logging in through the UI in every single test
+  await page.fill("#email", "user@example.com");
+  await page.fill("#password", process.env.E2E_PASSWORD!);
+  await page.click("text=Submit");
+});
+```
+
+</Tab>
+<Tab label="Correct">
+
+```ts
+// ✅ Role-based locators, auto-waiting actions, web-first assertions
+import { test, expect } from "@playwright/test";
+
+test("adds a product to the cart", async ({ page }) => {
+  await page.goto("/products"); // baseURL comes from the config
+
+  const card = page.getByRole("article").filter({ hasText: "Mechanical Keyboard" });
+  await card.getByRole("button", { name: "Add to cart" }).click(); // waits until actionable
+
+  // Retries until the text matches or the timeout passes
+  await expect(page.getByRole("link", { name: /cart/i })).toHaveText(/1 item/);
+});
+// Auth is handled once in a setup project (see below), not per test.
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why locators and web-first assertions remove flakiness">
+- A **locator** (`page.getByRole(...)`) is a lazy description, not an element handle. It is resolved again every time you use it, so re-renders don't leave you holding a stale node.
+- **Actions auto-wait**: before `click()`, Playwright waits until the element is attached, visible, stable (not animating), enabled, and receives events. No sleeps needed.
+- **Web-first assertions** like `await expect(locator).toHaveText(...)` retry until they pass or time out (5 seconds by default). Reading a value once with `textContent()` and comparing it races against React.
+- **Role-based locators** match what users see (role + accessible name), so they survive CSS and layout refactors and push you toward accessible markup.
+</Callout>
+
+## How to use
+
+1. **Install** and scaffold (creates `playwright.config.ts`, an example test and optionally a GitHub Actions workflow):
+
+   ```bash
+   npm init playwright@latest
+   # later, on a fresh machine or CI:
+   npx playwright install --with-deps
+   ```
+
+2. **Configure** `playwright.config.ts`, including a `webServer` that builds and starts the app:
+
+   ```ts
+   import { defineConfig, devices } from "@playwright/test";
+
+   const PORT = 3000;
+
+   export default defineConfig({
+     testDir: "./e2e",
+     fullyParallel: true,
+     forbidOnly: !!process.env.CI, // fail CI if someone commits test.only
+     retries: process.env.CI ? 2 : 0,
+     workers: process.env.CI ? 1 : undefined,
+     reporter: process.env.CI ? [["html"], ["github"]] : "list",
+     use: {
+       baseURL: `http://localhost:${PORT}`,
+       trace: "on-first-retry", // record a trace when a test is retried
+       screenshot: "only-on-failure",
+     },
+     projects: [
+       { name: "setup", testMatch: /.*\.setup\.ts/ },
+       {
+         name: "chromium",
+         use: { ...devices["Desktop Chrome"], storageState: "playwright/.auth/user.json" },
+         dependencies: ["setup"],
+       },
+       {
+         name: "mobile-safari",
+         use: { ...devices["iPhone 13"], storageState: "playwright/.auth/user.json" },
+         dependencies: ["setup"],
+       },
+     ],
+     webServer: {
+       // Test the production build, not the dev server
+       command: "npm run build && npm run start",
+       url: `http://localhost:${PORT}`,
+       reuseExistingServer: !process.env.CI,
+       timeout: 180_000,
+     },
+   });
+   ```
+
+3. **Add `playwright/.auth` to `.gitignore`** (it contains session cookies).
+
+4. **Run**: `npx playwright test` (headless), `npx playwright test --ui` (UI mode with time travel and watch), `npx playwright test --debug` (step through with the inspector), `npx playwright codegen localhost:3000` (record locators by clicking).
+
+5. **Inspect failures**: `npx playwright show-report` opens the HTML report; click a failed test to open its **trace** (DOM snapshots before and after every action, network, console, source). For a CI artifact: `npx playwright show-trace trace.zip`.
+
+6. **CI**: install browsers, run the tests, upload `playwright-report/` as an artifact so you can open traces from failed runs.
+
+   ```yaml
+   # .github/workflows/e2e.yml (excerpt)
+   - uses: actions/setup-node@v4
+     with: { node-version: 22, cache: npm }
+   - run: npm ci
+   - run: npx playwright install --with-deps
+   - run: npx playwright test
+     env:
+       E2E_USER_EMAIL: ${{ secrets.E2E_USER_EMAIL }}
+       E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
+   - uses: actions/upload-artifact@v4
+     if: ${{ !cancelled() }}
+     with: { name: playwright-report, path: playwright-report/, retention-days: 14 }
+   ```
+
+## Use-case demos
+
+### Use case 1: log in once, reuse the session everywhere
+
+```ts
+// e2e/auth.setup.ts
+import { test as setup, expect } from "@playwright/test";
+
+const authFile = "playwright/.auth/user.json";
+
+setup("authenticate", async ({ page }) => {
+  await page.goto("/login");
+  // Dedicated test account, credentials from CI secrets / local .env (never hard-coded)
+  await page.getByLabel("Email").fill(process.env.E2E_USER_EMAIL!);
+  await page.getByLabel("Password").fill(process.env.E2E_USER_PASSWORD!);
+  await page.getByRole("button", { name: "Sign in" }).click();
+
+  await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
+
+  // Saves cookies and localStorage; projects that depend on "setup" start logged in
+  await page.context().storageState({ path: authFile });
+});
+```
+
+Tests that must run **logged out** (the login page itself) can opt out with `test.use({ storageState: { cookies: [], origins: [] } })` at the top of the file.
+
+### Use case 2: a checkout flow
+
+```ts
+// e2e/checkout.spec.ts
+import { test, expect } from "@playwright/test";
+
+test.describe("checkout", () => {
+  test.beforeEach(async ({ request }) => {
+    // Arrange via API, not UI: fast and isolated per test
+    await request.delete("/api/test/cart"); // test-only endpoint, disabled in production
+  });
+
+  test("user can buy a product with a test card", async ({ page }) => {
+    await test.step("add to cart", async () => {
+      await page.goto("/products/mechanical-keyboard");
+      await page.getByRole("button", { name: "Add to cart" }).click();
+      await expect(page.getByRole("status")).toHaveText("Added to cart");
+    });
+
+    await test.step("fill shipping", async () => {
+      await page.getByRole("link", { name: /cart/i }).click();
+      await page.getByRole("button", { name: "Checkout" }).click();
+      await expect(page).toHaveURL(/\/checkout/);
+
+      await page.getByLabel("Full name").fill("Ada Lovelace");
+      await page.getByLabel("Address").fill("1 Test Street");
+      await page.getByLabel("Country").selectOption("GB");
+    });
+
+    await test.step("pay and confirm", async () => {
+      // Payment provider's test mode, stubbed or using its published test card
+      await page.getByRole("button", { name: "Pay now" }).click();
+
+      await expect(page.getByRole("heading", { name: "Thank you for your order" })).toBeVisible();
+      await expect(page.getByText(/Order #\d+/)).toBeVisible();
+    });
+  });
+
+  test("shows an error when payment is declined", async ({ page }) => {
+    // Mock just the payment API response for this test
+    await page.route("**/api/payments", (route) =>
+      route.fulfill({ status: 402, json: { message: "Card declined" } }),
+    );
+    await page.goto("/checkout?fixture=one-item");
+    await page.getByRole("button", { name: "Pay now" }).click();
+    await expect(page.getByRole("alert")).toHaveText("Card declined");
+  });
+});
+```
+
+### Use case 3: visual regression and accessibility checks
+
+```ts
+import { test, expect } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright"; // npm i -D @axe-core/playwright
+
+test("pricing page looks right and has no a11y violations", async ({ page }) => {
+  await page.goto("/pricing");
+
+  // First run writes the baseline image; later runs diff against it
+  await expect(page).toHaveScreenshot("pricing.png", {
+    fullPage: true,
+    mask: [page.getByTestId("live-visitor-count")], // hide dynamic content
+  });
+
+  const results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations).toEqual([]);
+});
+```
+
+Screenshots differ across operating systems (font rendering), so generate and compare baselines in the same environment, usually CI or the official Playwright Docker image. Update them intentionally with `npx playwright test --update-snapshots`. See [Accessibility](/production/accessibility) for what axe can and can't catch.
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Flaky test causes** and fixes: fixed sleeps (use auto-waiting and web-first assertions); shared test data between parallel workers (create unique data per test, or reset via API); depending on test order (each test must stand alone); animations and third-party scripts (disable or `page.route` them); asserting on time-sensitive text (use `page.clock` to control time).
+- **Retries hide problems.** `retries: 2` keeps CI green, but the report marks retried tests as "flaky"; track and fix them instead of ignoring them.
+- Running E2E against `next dev` is slower and behaves differently (on-demand compilation, dev-only warnings, no production caching). Use `next build && next start` in CI.
+- Don't test **third-party sites** you don't control (real payment pages, OAuth providers). Use their test modes or mock their responses with `page.route`.
+- Don't use E2E for every validation message or edge case. They are slow and expensive to maintain; push variations down to component tests.
+- `page.locator(".css > selectors")` and XPath break on refactors. Prefer `getByRole`, `getByLabel`, `getByText`, then `getByTestId`.
+- Never point E2E tests at production with real accounts or payments. Use a dedicated test environment and seeded test users.
+</Callout>
+
+## Interview questions
+
+<QA q="When would you write an E2E test instead of a component test?" level="junior">
+
+When the value is in verifying that the whole stack works together for a critical user journey: login, checkout, sign up, the core feature. Component tests are faster and better for variations and edge cases, but they mock the network and don't run routing, cookies, server code or the real browser. A good balance is many integration/component tests and a small, focused set of E2E tests on the paths that must never break.
+
+</QA>
+
+<QA q="What is auto-waiting in Playwright?" level="junior">
+
+Before performing an action like `click()` or `fill()`, Playwright waits until the target element is attached, visible, stable, enabled and able to receive events. If those conditions aren't met within the action timeout, the test fails with a clear message. This removes the need for manual sleeps, which are both slow and unreliable.
+
+</QA>
+
+<QA q="What are web-first assertions and why do they matter?" level="mid">
+
+They are async assertions on locators or the page, such as `await expect(locator).toBeVisible()` or `await expect(page).toHaveURL(...)`, that keep retrying until the condition is true or a timeout passes. React updates the DOM asynchronously, so reading a value once and comparing it is a race. Web-first assertions wait for the UI to settle, which removes a major source of flakiness.
+
+</QA>
+
+<QA q="How do you avoid logging in through the UI in every test?" level="mid">
+
+Use a setup project that logs in once and saves the browser state with `page.context().storageState({ path })`. Other projects declare `dependencies: ['setup']` and `use.storageState` pointing at that file, so every test starts with the session cookies already set. For multiple roles you save one file per role (admin, member). The state file contains real session data, so it must be git-ignored.
+
+</QA>
+
+<QA q="How do you run Playwright against a Next.js app in CI?" level="mid">
+
+Configure `webServer` in `playwright.config.ts` with a command that builds and starts the production server (`npm run build && npm run start`), the URL to wait for, and `reuseExistingServer: !process.env.CI` so local runs can reuse a dev server. In CI you run `npx playwright install --with-deps`, then `npx playwright test`, and upload the HTML report as an artifact. Secrets for test accounts come from CI environment variables.
+
+</QA>
+
+<QA q="A test passes locally but fails in CI. How do you debug it?" level="senior">
+
+Download the HTML report artifact and open the **trace** of the failed attempt: it shows DOM snapshots before and after each action, network requests, console errors and timing, which usually reveals the cause directly. Common culprits are differences in speed (CI is slower, so a non-retrying check races), environment (missing env vars, different base URL, a dev server locally versus a production build in CI), data shared between parallel workers, and viewport, timezone or locale differences. Reproduce locally with `CI=1` and the same worker count, fix the root cause, and avoid papering over it with longer timeouts or more retries.
+
+</QA>
+
+<QA q="What makes E2E tests flaky and how do you fix it at the suite level?" level="senior">
+
+The main causes are timing assumptions, shared mutable state (the same user or cart used by parallel tests), test-order dependence, uncontrolled external services, and animations or dynamic content. Fixes: rely on locators, auto-waiting and web-first assertions; give each test its own data, created through an API or fixture; mock third parties with `page.route`; control time with `page.clock`; and keep tests independent so they can run in any order and in parallel. Track tests reported as flaky after retries and treat them as bugs.
+
+</QA>
+
+<QA q="How would you test a checkout flow that uses a third-party payment provider?" level="senior">
+
+I wouldn't drive the real provider's hosted page in a normal E2E run. Either use the provider's test mode with its published test cards in a dedicated test environment, or intercept the payment API call with `page.route` and return success or decline responses so both paths are covered deterministically. Cart setup happens through an API or seeded data to keep the test fast, and the assertions focus on what the user sees: the confirmation page, the order number, and the error message for a declined card. A separate, less frequent smoke test can verify the real integration in staging.
+
+</QA>

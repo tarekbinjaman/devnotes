@@ -15,6 +15,7 @@ Built with Next.js (App Router) + MDX + Tailwind CSS. Fully static, so it's free
 ```bash
 npm install
 npm run dev      # http://localhost:3000
+node scripts/check-mdx.mjs   # check all feature pages compile and have interview questions
 ```
 
 ## Add a new feature
